@@ -1,81 +1,190 @@
+"use client";
+
+import { useEffect, useState, useRef } from "react";
 import Navbar from "@/components/Navbar";
 
 export default function LivePage() {
+  const [cameras, setCameras] = useState<{ id: string; image: string; lastSeen: number }[]>([]);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    const connect = () => {
+      const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+      const wsHost = window.location.host;
+      const ws = new WebSocket(`${protocol}${wsHost}/ws/dashboard`);
+      wsRef.current = ws;
+
+      ws.onopen = () => setWsConnected(true);
+      ws.onclose = () => {
+        setWsConnected(false);
+        setTimeout(connect, 3000); // auto-reconnect
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "preview") {
+            setCameras((prev) => {
+              const now = Date.now();
+              const existing = prev.find((c) => c.id === data.id);
+              if (existing) {
+                return prev.map((c) =>
+                  c.id === data.id ? { ...c, image: data.image, lastSeen: now } : c
+                );
+              } else {
+                return [...prev, { id: data.id, image: data.image, lastSeen: now }];
+              }
+            });
+          } else if (data.type === "disconnect") {
+            setCameras((prev) => prev.filter((c) => c.id !== data.id));
+          } else if (data.type === "info") {
+            if (data.message === "ESP32_STARTED" || data.message === "STARTED") {
+              setIsRecording(true);
+              if (data.session_id) setSessionId(data.session_id);
+            } else if (data.message === "STOPPED") {
+              setIsRecording(false);
+            }
+          }
+        } catch {}
+      };
+    };
+
+    connect();
+
+    // Watchdog timer to remove phantom cameras
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setCameras((prev) => prev.filter((c) => now - c.lastSeen < 2500));
+    }, 1000);
+
+    return () => {
+      wsRef.current?.close();
+      clearInterval(interval);
+    };
+  }, []);
+
+  const handleStart = () => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      const sid = Date.now().toString();
+      setSessionId(sid);
+      setIsRecording(true);
+      wsRef.current.send(JSON.stringify({ command: "start", session_id: sid }));
+    }
+  };
+
+  const handleStop = () => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setIsRecording(false);
+      wsRef.current.send(JSON.stringify({ command: "stop" }));
+    }
+  };
+
   return (
     <>
       <Navbar />
-      <main className="container" style={{ paddingTop: 40 }}>
-        <div className="page-header">
-          <h1 className="page-title">Live Stream Viewer</h1>
-          <p className="page-subtitle">
-            Phase 2: Real-time synchronized multi-camera stream via RTMP → HLS.
-          </p>
+      <main className="container" style={{ paddingTop: 40, minHeight: "100vh" }}>
+        <div className="page-header" style={{ textAlign: "center", marginBottom: 20 }}>
+          <h1 className="page-title">🎬 Master Control Dashboard</h1>
+          <p className="page-subtitle">Real-time synchronized multi-camera control panel</p>
+        </div>
+
+        {/* Status bar */}
+        <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 20, marginBottom: 24, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ width: 10, height: 10, borderRadius: "50%", backgroundColor: wsConnected ? "#2ecc71" : "#e74c3c", display: "inline-block", boxShadow: wsConnected ? "0 0 8px #2ecc71" : "0 0 8px #e74c3c" }} />
+            <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{wsConnected ? "Server connected" : "Reconnecting..."}</span>
+          </div>
+          {sessionId && (
+            <div style={{ fontSize: 12, color: "var(--text-muted)", fontFamily: "monospace" }}>
+              Session: <strong style={{ color: isRecording ? "#e74c3c" : "var(--text-secondary)" }}>{sessionId}</strong>
+              {isRecording && <span style={{ marginLeft: 8 }}>🔴 Recording</span>}
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "center", gap: 20, marginBottom: 40 }}>
+          <button
+            onClick={handleStart}
+            disabled={isRecording || !wsConnected}
+            style={{
+              padding: "15px 30px",
+              fontSize: 18,
+              cursor: isRecording || !wsConnected ? "not-allowed" : "pointer",
+              borderRadius: 5,
+              border: "none",
+              background: isRecording ? "#7f1d1d" : "#e74c3c",
+              color: "white",
+              fontWeight: "bold",
+              opacity: isRecording ? 0.6 : 1,
+            }}
+          >
+            🔴 RECORD ALL
+          </button>
+          <button
+            onClick={handleStop}
+            disabled={!isRecording || !wsConnected}
+            style={{
+              padding: "15px 30px",
+              fontSize: 18,
+              cursor: !isRecording || !wsConnected ? "not-allowed" : "pointer",
+              borderRadius: 5,
+              border: "none",
+              background: "#95a5a6",
+              color: "white",
+              fontWeight: "bold",
+              opacity: !isRecording ? 0.6 : 1,
+            }}
+          >
+            ⏹ STOP ALL
+          </button>
         </div>
 
         <div
-          className="card"
+          className="camera-grid"
           style={{
-            textAlign: "center",
-            padding: "80px 40px",
-            borderStyle: "dashed",
-            borderColor: "rgba(139,92,246,0.3)",
-            background: "rgba(139,92,246,0.04)",
+            display: "flex",
+            flexWrap: "wrap",
+            justifyContent: "center",
+            gap: 20,
           }}
         >
-          <div style={{ fontSize: 64, marginBottom: 20 }}>🎬</div>
-          <h2
-            style={{
-              fontSize: 22,
-              fontWeight: 700,
-              marginBottom: 12,
-              background: "linear-gradient(135deg, var(--accent-blue), var(--accent-purple))",
-              WebkitBackgroundClip: "text",
-              WebkitTextFillColor: "transparent",
-            }}
-          >
-            Live Streaming — Coming in Phase 2
-          </h2>
-          <p
-            style={{
-              color: "var(--text-secondary)",
-              maxWidth: 480,
-              margin: "0 auto 32px",
-              lineHeight: 1.7,
-            }}
-          >
-            Phase 2 will add real-time RTMP ingest from mobile phones via{" "}
-            <strong style={{ color: "var(--text-primary)" }}>MediaMTX</strong>,
-            synchronized HLS output, and a multi-camera grid player using{" "}
-            <strong style={{ color: "var(--text-primary)" }}>hls.js</strong>.
-          </p>
-
-          <div
-            style={{
-              display: "flex",
-              gap: 12,
-              justifyContent: "center",
-              flexWrap: "wrap",
-            }}
-          >
-            {["📡 RTMP Ingest", "🔄 Real-time Sync", "📺 HLS Delivery", "🎛️ Multi-cam Grid"].map(
-              (f) => (
-                <span
-                  key={f}
+          {cameras.length === 0 ? (
+            <div style={{ color: "var(--text-secondary)", marginTop: 40 }}>
+              Waiting for cameras to connect...
+            </div>
+          ) : (
+            cameras.map((cam) => (
+              <div
+                key={cam.id}
+                className="cam-view card"
+                style={{
+                  background: "#333",
+                  padding: 10,
+                  borderRadius: 8,
+                  border: "2px solid #555",
+                  textAlign: "center",
+                }}
+              >
+                <h3 style={{ margin: "0 0 10px 0", color: "#fff", fontSize: 16 }}>
+                  Camera: {cam.id}
+                </h3>
+                <img
+                  src={cam.image}
+                  alt={`Cam ${cam.id}`}
                   style={{
-                    background: "rgba(139,92,246,0.1)",
-                    border: "1px solid rgba(139,92,246,0.2)",
-                    color: "var(--accent-purple)",
-                    padding: "6px 14px",
-                    borderRadius: "999px",
-                    fontSize: 13,
-                    fontWeight: 500,
+                    width: 320,
+                    height: 240,
+                    backgroundColor: "black",
+                    borderRadius: 4,
+                    objectFit: "cover",
                   }}
-                >
-                  {f}
-                </span>
-              )
-            )}
-          </div>
+                />
+              </div>
+            ))
+          )}
         </div>
       </main>
     </>

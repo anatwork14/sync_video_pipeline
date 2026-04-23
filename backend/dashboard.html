@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Central Camera Dashboard</title>
+    <style>
+        body { font-family: sans-serif; background: #1e1e1e; color: white; text-align: center; padding: 20px; }
+        .camera-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; margin-top: 30px; }
+        .cam-view { background: #333; padding: 10px; border-radius: 8px; border: 2px solid #555; transition: opacity 0.3s ease; }
+        img { width: 320px; height: 240px; background: black; border-radius: 4px; object-fit: cover; }
+        button { padding: 15px 30px; font-size: 18px; margin: 10px; cursor: pointer; border-radius: 5px; border: none; font-weight: bold; }
+        #startBtn { background: #e74c3c; color: white; }
+        #stopBtn { background: #95a5a6; color: white; }
+        #startBtn:active { background: #c0392b; }
+    </style>
+</head>
+<body>
+    <h1>🎬 Master Control Dashboard</h1>
+    <button id="startBtn">🔴 RECORD ALL</button>
+    <button id="stopBtn">⏹ STOP ALL</button>
+    
+    <div class="camera-grid" id="grid"></div>
+
+    <script>
+        const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+        const ws = new WebSocket(`${protocol}${window.location.host}/ws/dashboard`);
+        const grid = document.getElementById('grid');
+
+        // Dictionary to track the last time we saw a frame from each camera
+        // Looks like: { "xyz123": 1698765432100 }
+        const activeCameras = {};
+
+        // Generate a Session ID and send it with the start command
+        document.getElementById('startBtn').onclick = () => {
+            const sessionId = Date.now().toString(); // e.g., "1698765432100"
+            ws.send(JSON.stringify({command: "start", session_id: sessionId}));
+        };
+        
+        document.getElementById('stopBtn').onclick = () => {
+            ws.send(JSON.stringify({command: "stop"}));
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            // 1. Handle incoming previews
+            if (data.type === "preview") {
+                // Update the heartbeat timestamp for this camera
+                activeCameras[data.id] = Date.now();
+
+                let camBox = document.getElementById('cam-box-' + data.id);
+                
+                // If it's a new camera, build its UI box
+                if (!camBox) {
+                    camBox = document.createElement('div');
+                    camBox.id = 'cam-box-' + data.id; // Give the wrapper an ID so we can delete it
+                    camBox.className = 'cam-view';
+                    camBox.innerHTML = `<h3>Camera ID: ${data.id}</h3><img id="cam-${data.id}">`;
+                    grid.appendChild(camBox);
+                }
+                
+                // Update the image
+                document.getElementById('cam-' + data.id).src = data.image; 
+            } 
+            
+            // 2. Handle Explicit Disconnects from the Python Server
+            else if (data.type === "disconnect") {
+                removeCameraFromDashboard(data.id);
+            }
+        };
+
+        // Helper function to cleanly remove a camera from the UI
+        function removeCameraFromDashboard(id) {
+            const camBox = document.getElementById('cam-box-' + id);
+            if (camBox) {
+                camBox.remove();
+                delete activeCameras[id];
+                console.log(`Removed disconnected camera: ${id}`);
+            }
+        }
+
+        // 3. The Watchdog Timer (Handles silent network drops)
+        // Runs every 1 second
+        setInterval(() => {
+            const now = Date.now();
+            for (const [id, lastSeenTimestamp] of Object.entries(activeCameras)) {
+                // If we haven't received a frame from this camera in 2.5 seconds,
+                // assume it has crashed/dropped and remove it.
+                if (now - lastSeenTimestamp > 2500) {
+                    console.log(`Camera ${id} timed out. Removing from grid.`);
+                    removeCameraFromDashboard(id);
+                }
+            }
+        }, 1000);
+
+    </script>
+</body>
+</html>

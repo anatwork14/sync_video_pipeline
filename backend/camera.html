@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Camera Node</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; background: #222; color: white; padding: 20px; }
+        video { width: 100%; max-width: 400px; background: black; border-radius: 8px; }
+        #status { margin-top: 20px; font-size: 18px; font-weight: bold; color: #f39c12; }
+    </style>
+</head>
+<body>
+    <h2>📱 Camera Node</h2>
+    <video id="preview" autoplay muted playsinline></video>
+    <div id="status">Waiting for Dashboard command...</div>
+
+    <script>
+        const previewVideo = document.getElementById('preview');
+        const statusText = document.getElementById('status');
+        let mediaRecorder;
+        let stream;
+        let chunkIndex = 0;
+        let currentSessionId = ""; // Add this at the top with your other let variables
+        
+        // Generate a random 6-character ID for this phone
+        const deviceId = Math.random().toString(36).substring(2, 8); 
+
+        // Secure WebSocket connection
+        const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+        const ws = new WebSocket(`${protocol}${window.location.host}/ws/camera`);
+
+        async function setupCamera() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+                    audio: true 
+                });
+                previewVideo.srcObject = stream;
+            } catch (error) {
+                alert(`Camera failed: ${error.name}\nMessage: ${error.message}\nMake sure you are using Safari/Chrome!`);
+            }
+        }
+
+        // 1. Catch the session_id from the dashboard
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.command === "start" && stream) {
+                currentSessionId = data.session_id; // Save it!
+                startRecording();
+            } else if (data.command === "stop" && mediaRecorder) {
+                stopRecording();
+            }
+        };
+
+        // 2. Add it to the FormData upload
+        function startRecording() {
+            mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm; codecs=vp8,opus' });
+            
+            // Add an upload queue to guarantee chunks arrive in perfect order
+            let uploadQueue = Promise.resolve(); 
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data && event.data.size > 0) {
+                    const chunkBlob = event.data;
+                    const formData = new FormData();
+                    formData.append("file", chunkBlob, "live_stream.webm");
+                    formData.append("device_id", deviceId); 
+                    formData.append("session_id", currentSessionId); 
+
+                    // Chain the fetches together. 
+                    // This waits for the previous upload to finish before starting this one.
+                    uploadQueue = uploadQueue.then(() => {
+                        return fetch('/upload', { method: 'POST', body: formData });
+                    }).catch((err) => {
+                        console.error("Upload failed:", err);
+                    });
+                }
+            };
+
+            mediaRecorder.start(2000); 
+            statusText.innerText = "🔴 RECORDING & STREAMING...";
+            statusText.style.color = "#e74c3c";
+        }
+
+        function stopRecording() {
+            mediaRecorder.stop();
+            statusText.innerText = "⏹ STOPPED. Waiting for command...";
+            statusText.style.color = "#f39c12";
+        }
+
+        // Send a low-res live preview snapshot to the dashboard every 500ms
+        setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN && stream) {
+                const canvas = document.createElement('canvas');
+                canvas.width = 320; 
+                canvas.height = 240;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(previewVideo, 0, 0, canvas.width, canvas.height);
+                
+                const base64Image = canvas.toDataURL('image/jpeg', 0.5);
+                ws.send(JSON.stringify({ type: "preview", id: deviceId, image: base64Image }));
+            }
+        }, 500); 
+
+        // Initialize camera on page load
+        setupCamera();
+    </script>
+</body>
+</html>
