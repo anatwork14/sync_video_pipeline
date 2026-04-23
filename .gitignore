@@ -37,12 +37,13 @@ out/
 next-env.d.ts
 
 # Storage (never commit video files)
-backend/storage/raw/
-backend/storage/synced/
+backend/storage/
+backend/video_chunks/
 *.mp4
 *.avi
 *.mov
 *.mkv
+*.webm
 *.wav
 *.flac
 
