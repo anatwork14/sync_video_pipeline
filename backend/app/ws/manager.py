@@ -26,13 +26,12 @@ class ConnectionManager:
 
     async def disconnect(self, session_id: str, websocket: WebSocket) -> None:
         async with self._lock:
-            self._connections[session_id].discard(websocket) if hasattr(self._connections[session_id], 'discard') else None
             try:
                 self._connections[session_id].remove(websocket)
             except ValueError:
-                pass
-            if not self._connections[session_id]:
-                del self._connections[session_id]
+                pass  # Already removed
+            if not self._connections.get(session_id):
+                self._connections.pop(session_id, None)
         logger.info(f"[WS] Client disconnected from session {session_id}")
 
     async def broadcast(self, session_id: str, event: dict) -> None:

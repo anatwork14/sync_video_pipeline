@@ -41,22 +41,23 @@ def main():
         except Exception as e:
             print(f" ❌ Error updating docker-compose.yml: {e}")
             
-        # Update backend/.env
-        try:
-            with open('backend/.env', 'r') as f:
-                env = f.read()
-            # Replace the cloudflare origin in the array if it exists, or add it. 
-            # We know it looks like "https://...trycloudflare.com"
-            env = re.sub(r'"https://[a-zA-Z0-9-]+\.trycloudflare\.com"', f'"{url}"', env)
-            with open('backend/.env', 'w') as f:
-                f.write(env)
-            print(" ✅ Updated backend/.env")
-        except Exception as e:
-            print(f" ❌ Error updating backend/.env: {e}")
+        # Update root .env and backend/.env
+        for env_path in ['.env', 'backend/.env']:
+            try:
+                with open(env_path, 'r') as f:
+                    env_data = f.read()
+                # Replace the cloudflare origin in the array if it exists
+                env_data = re.sub(r'"https://[a-zA-Z0-9-]+\.trycloudflare\.com"', f'"{url}"', env_data)
+                with open(env_path, 'w') as f:
+                    f.write(env_data)
+                print(f" ✅ Updated {env_path}")
+            except Exception as e:
+                print(f" ❌ Error updating {env_path}: {e}")
             
         print("\nRestarting Docker containers with new config...")
-        # Since Next.js needs the NEXT_PUBLIC_ variables at run/build time, we might need to recreate the frontend container
-        subprocess.run(["docker", "compose", "up", "-d"])
+        # Next.js NEXT_PUBLIC_ env vars are baked at BUILD time, not runtime.
+        # We must rebuild the frontend image for the new tunnel URL to work.
+        subprocess.run(["docker", "compose", "up", "-d", "--build", "frontend"])
         
         print("\n" + "="*60)
         print(f"🚀 PIPELINE IS READY!")

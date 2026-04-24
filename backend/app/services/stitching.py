@@ -6,6 +6,13 @@ import ffmpeg
 
 logger = logging.getLogger(__name__)
 
+def has_audio(input_path: Path) -> bool:
+    try:
+        probe = ffmpeg.probe(str(input_path))
+        return any(stream.get('codec_type') == 'audio' for stream in probe.get('streams', []))
+    except ffmpeg.Error:
+        return False
+
 
 class StitchLayout(str, Enum):
     HSTACK = "hstack"      # All cameras side by side horizontally
@@ -34,17 +41,12 @@ def stitch_chunks(
     n = len(cam_ids)
 
     inputs = [ffmpeg.input(str(aligned_paths[cam])) for cam in cam_ids]
+    audio_inputs = [inp.audio for cam, inp in zip(cam_ids, inputs) if has_audio(aligned_paths[cam])]
 
     if layout == StitchLayout.HSTACK:
-        filter_str = f"{''.join(f'[{i}:v]' for i in range(n))}hstack=inputs={n}[v]"
-        audio_filter = f"{''.join(f'[{i}:a]' for i in range(n))}amix=inputs={n}[a]"
         combined = ffmpeg.filter(inputs, "hstack", inputs=n)
-        audio = ffmpeg.filter([inp.audio for inp in inputs], "amix", inputs=n)
-
     elif layout == StitchLayout.VSTACK:
         combined = ffmpeg.filter(inputs, "vstack", inputs=n)
-        audio = ffmpeg.filter([inp.audio for inp in inputs], "amix", inputs=n)
-
     elif layout == StitchLayout.GRID_2x2:
         if n < 4:
             raise ValueError("GRID_2x2 requires exactly 4 camera inputs")
@@ -54,17 +56,29 @@ def stitch_chunks(
         bottom = ffmpeg.filter([inputs[2], inputs[3]], "hstack", inputs=2)
         # Combine rows
         combined = ffmpeg.filter([top, bottom], "vstack", inputs=2)
-        audio = ffmpeg.filter([inp.audio for inp in inputs], "amix", inputs=n)
-
     else:
         raise ValueError(f"Unknown layout: {layout}")
 
-    (
-        ffmpeg
-        .output(combined, audio, str(output_path), vcodec="libx264", acodec="aac", preset="fast")
-        .overwrite_output()
-        .run(quiet=True)
-    )
+    out_kwargs = {"vcodec": "libx264", "preset": "fast"}
+    if audio_inputs:
+        audio = ffmpeg.filter(audio_inputs, "amix", inputs=len(audio_inputs))
+        out_kwargs["acodec"] = "aac"
+        stream = ffmpeg.output(combined, audio, str(output_path), **out_kwargs)
+    else:
+        stream = ffmpeg.output(combined, str(output_path), **out_kwargs)
+
+    try:
+        (
+            stream
+            .overwrite_output()
+            .run(quiet=True)
+        )
+    except ffmpeg.Error as e:
+        stderr = e.stderr.decode("utf-8") if e.stderr else "Unknown ffmpeg error"
+        logger.error(f"FFmpeg Error in stitching:\n{stderr}")
+        with open("/app/storage/ffmpeg_error.log", "a") as f:
+            f.write(f"=== STITCHING ERROR ({output_path.name}) ===\n{stderr}\n\n")
+        raise RuntimeError(f"FFmpeg stitching failed: {stderr}")
 
     logger.info(f"Stitched {n} cameras → {output_path.name} (layout={layout})")
     return output_path

@@ -6,9 +6,10 @@ import logging
 from pathlib import Path
 
 from app.config import get_settings
-from app.services.offset import compute_offsets, save_offsets, load_offsets
+from app.services.offset import save_offsets, load_offsets
 from app.services.alignment import align_all_chunks
 from app.services.stitching import stitch_chunks, StitchLayout
+from app.services.strategies import get_sync_strategy
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -19,6 +20,7 @@ def run_sync_pipeline(
     chunk_index: int,
     cam_ids: list[str],
     layout: StitchLayout = StitchLayout.HSTACK,
+    strategy_name: str = "multividsynch",
 ) -> Path:
     """
     Full pipeline: offset discovery (chunk 0) → align → stitch.
@@ -37,8 +39,9 @@ def run_sync_pipeline(
 
     # Step 1: Compute offsets — only on the first chunk
     if chunk_index == 0:
-        logger.info(f"[{session_id}] Computing offsets from chunk_0 (clap sync)...")
-        offsets = compute_offsets(chunk_dir, cam_ids)
+        logger.info(f"[{session_id}] Computing offsets from chunk_0 using {strategy_name} strategy...")
+        strategy = get_sync_strategy(strategy_name)
+        offsets = strategy.compute_offsets(chunk_dir, cam_ids)
         save_offsets(offsets, session_dir)
         logger.info(f"[{session_id}] Offsets saved: {offsets}")
     else:

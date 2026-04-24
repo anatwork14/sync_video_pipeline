@@ -14,6 +14,7 @@ class Session(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     camera_count: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     status: Mapped[str] = mapped_column(String(50), default="recording")  # recording|processing|completed|failed
+    sync_strategy: Mapped[str] = mapped_column(String(50), default="multividsynch") # multividsynch|audio
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

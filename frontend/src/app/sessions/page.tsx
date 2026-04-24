@@ -26,12 +26,13 @@ export default function SessionsPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [camCount, setCamCount] = useState(3);
+  const [syncStrategy, setSyncStrategy] = useState("multividsynch");
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
     setCreating(true);
     try {
-      await api.sessions.create(newName.trim(), camCount);
+      await api.sessions.create(newName.trim(), camCount, syncStrategy);
       setNewName("");
       mutate();
       addToast({ type: "success", title: "Session Created", message: `Successfully created "${newName.trim()}"` });
@@ -98,6 +99,18 @@ export default function SessionsPage() {
                 disabled={creating}
               />
             </div>
+            <div style={{ width: 180 }}>
+              <label className="label">Sync Strategy</label>
+              <select
+                className="input"
+                value={syncStrategy}
+                onChange={(e) => setSyncStrategy(e.target.value)}
+                disabled={creating}
+              >
+                <option value="multividsynch">MultiVidSynch (Feature)</option>
+                <option value="audio">Audio</option>
+              </select>
+            </div>
             <button
               className="btn btn-primary"
               onClick={handleCreate}
@@ -154,6 +167,9 @@ export default function SessionsPage() {
                 <div style={{ display: "flex", gap: 24, color: "var(--text-secondary)", fontSize: 14, marginBottom: 24 }}>
                   <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={{ color: "var(--accent-fuchsia)" }}>📱</span> {session.camera_count} Cameras
+                  </span>
+                  <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ color: "var(--accent-blue)" }}>⚙️</span> {session.sync_strategy === "audio" ? "Audio" : "MultiVidSynch"}
                   </span>
                   <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={{ color: "var(--accent-blue)" }}>🕒</span>

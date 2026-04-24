@@ -111,6 +111,7 @@ async def upload_chunk(
             session_id=str(session_id),
             chunk_index=chunk_index,
             cam_ids=cam_ids,
+            sync_strategy=session.sync_strategy,
         )
         processing_triggered = True
 

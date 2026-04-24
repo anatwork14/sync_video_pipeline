@@ -13,20 +13,35 @@ interface WebSocketEvent {
 
 export function useWebSocket(sessionId: string | null) {
   const ws = useRef<WebSocket | null>(null);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [events, setEvents] = useState<WebSocketEvent[]>([]);
   const [connected, setConnected] = useState(false);
 
   const connect = useCallback(() => {
     if (!sessionId) return;
-    const wsUrl =
-      (process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000") +
-      `/ws/${sessionId}`;
+
+    // Derive WebSocket URL from the current page's host.
+    // This works correctly both on localhost AND through Cloudflare tunnel
+    // without needing a baked NEXT_PUBLIC_WS_URL env var.
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws/${sessionId}`;
 
     ws.current = new WebSocket(wsUrl);
 
-    ws.current.onopen = () => setConnected(true);
-    ws.current.onclose = () => setConnected(false);
-    ws.current.onerror = () => setConnected(false);
+    ws.current.onopen = () => {
+      setConnected(true);
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    };
+
+    ws.current.onclose = () => {
+      setConnected(false);
+      // Auto-reconnect with 3s backoff
+      reconnectTimer.current = setTimeout(connect, 3000);
+    };
+
+    ws.current.onerror = () => {
+      ws.current?.close();
+    };
 
     ws.current.onmessage = (e) => {
       try {
@@ -44,6 +59,7 @@ export function useWebSocket(sessionId: string | null) {
 
     return () => {
       clearInterval(ping);
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       ws.current?.close();
     };
   }, [sessionId]);

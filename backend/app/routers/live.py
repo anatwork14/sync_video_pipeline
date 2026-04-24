@@ -3,18 +3,34 @@ import subprocess
 import time
 import logging
 import asyncio
+import uuid
+import shutil
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, Form, WebSocket, WebSocketDisconnect
+
+from fastapi import APIRouter, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Depends
+
+from app.config import get_settings
+from app.database import AsyncSessionLocal, get_db
+from app.models import Session, Chunk
+from app.ws.manager import manager
+from app.workers.tasks import process_chunk_set
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["live"])
+settings = get_settings()
 
 # Directories
-CHUNKS_DIR = Path("video_chunks")
-SYNCED_DIR = Path("storage/synced")
-CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
+RAW_DIR = Path(settings.storage_base) / "raw"
+SYNCED_DIR = Path(settings.storage_base) / "synced"
+RAW_DIR.mkdir(parents=True, exist_ok=True)
 SYNCED_DIR.mkdir(parents=True, exist_ok=True)
+
+# Deprecated/Old Directory for concat
+CHUNKS_DIR = Path("video_chunks")
+CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Track connections
 active_cameras: list[WebSocket] = []
@@ -24,21 +40,55 @@ current_active_session: str | None = None
 
 # chunk_counters[device_id] = next chunk index
 chunk_counters: dict[str, int] = {}
-
+# track uploaded devices per chunk index per session: 
+# uploaded_chunks[session_id][chunk_idx] = set(device_ids)
+uploaded_chunks: dict[str, dict[int, set[str]]] = {}
 
 # ── Session control ───────────────────────────────────────────────────────────
 
 async def handle_trigger_logic(session_id_from_dash: str | None = None):
     global current_active_session
+    global chunk_counters
+    global uploaded_chunks
 
     if current_active_session is None:
         # START
-        session_id = session_id_from_dash or str(int(time.time()))
+        session_id = session_id_from_dash or str(uuid.uuid4())
         current_active_session = session_id
         chunk_counters.clear()
+        uploaded_chunks[session_id] = {}
+
+        # The number of expected cameras is the number currently connected, defaulting to 3 if none
+        expected_cameras = max(1, len(active_cameras))
+
+        # Create session in DB
+        async with AsyncSessionLocal() as db:
+            try:
+                # Convert string to UUID if possible, else just use the string.
+                # Since models.Session.id is a UUID, we should parse it.
+                # If session_id_from_dash isn't a valid UUID, generate one.
+                try:
+                    sess_uuid = uuid.UUID(session_id)
+                except ValueError:
+                    sess_uuid = uuid.uuid4()
+                    session_id = str(sess_uuid)
+                    current_active_session = session_id
+                
+                db_session = Session(
+                    id=sess_uuid,
+                    name=f"Live Session {session_id[:8]}",
+                    camera_count=expected_cameras,
+                    status="recording",
+                    sync_strategy="multividsynch"
+                )
+                db.add(db_session)
+                await db.commit()
+                logger.info(f"▶️  DB SESSION CREATED: {session_id} with {expected_cameras} cameras")
+            except Exception as e:
+                logger.error(f"❌ Failed to create DB session: {e}")
 
         # Create per-session chunk dir
-        session_dir = CHUNKS_DIR / session_id
+        session_dir = RAW_DIR / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(f"▶️  SESSION START: {session_id}  dir={session_dir}")
@@ -53,7 +103,17 @@ async def handle_trigger_logic(session_id_from_dash: str | None = None):
         logger.info(f"⏹  SESSION STOP: {stopped_session}")
         await broadcast_status("stop")
 
-        # Concatenate chunks for each device in the background
+        async with AsyncSessionLocal() as db:
+            try:
+                sess_uuid = uuid.UUID(stopped_session)
+                db_session = await db.get(Session, sess_uuid)
+                if db_session:
+                    db_session.status = "completed"
+                    await db.commit()
+            except Exception as e:
+                logger.error(f"❌ Failed to update DB session status: {e}")
+
+        # Also trigger the old concatenate logic as fallback or secondary output
         asyncio.create_task(concatenate_session(stopped_session))
 
         return {"status": "stopped", "session_id": stopped_session}
@@ -61,24 +121,40 @@ async def handle_trigger_logic(session_id_from_dash: str | None = None):
 
 async def concatenate_session(session_id: str):
     """FFmpeg-concatenate all saved chunks per device into one final MP4."""
-    session_dir = CHUNKS_DIR / session_id
+    # We still use CHUNKS_DIR here if any chunks were saved there,
+    # but now we save them in RAW_DIR. We can iterate RAW_DIR to concat full streams.
+    session_dir = RAW_DIR / session_id
     if not session_dir.exists():
         return
 
-    devices = set(p.stem.rsplit("_chunk_", 1)[0] for p in session_dir.glob("*_chunk_*.*"))
+    # Find devices based on chunk_0 if available
+    devices = set()
+    for chunk_dir in session_dir.glob("chunk_*"):
+        if chunk_dir.is_dir():
+            devices.update([p.stem for p in chunk_dir.glob("*.*") if p.is_file()])
+            
+    if not devices:
+        return
+
     logger.info(f"🎬 Concatenating {len(devices)} device(s) for session {session_id}")
 
     for device_id in devices:
-        # Collect chunks in order
-        chunks = sorted(session_dir.glob(f"{device_id}_chunk_*.*"),
-                        key=lambda p: int(p.stem.rsplit("_chunk_", 1)[1]))
+        # Collect chunks in order by iterating chunk_dirs
+        chunks = []
+        chunk_dirs = sorted([d for d in session_dir.glob("chunk_*") if d.is_dir()],
+                            key=lambda d: int(d.name.split("_")[1]))
+        
+        for d in chunk_dirs:
+            # Look for device_id.mp4 or .webm
+            device_files = list(d.glob(f"{device_id}.*"))
+            if device_files:
+                chunks.append(device_files[0])
+
         if not chunks:
             continue
 
-        # Detect extension from first chunk
-        ext = chunks[0].suffix  # .mp4 or .webm
+        ext = chunks[0].suffix
 
-        # Write FFmpeg concat list
         concat_list = session_dir / f"{device_id}_concat.txt"
         with open(concat_list, "w") as f:
             for c in chunks:
@@ -92,7 +168,7 @@ async def concatenate_session(session_id: str):
             "-c", "copy",
             str(out_file),
         ]
-        logger.info(f"🎬 FFmpeg concat: {[str(c.name) for c in chunks]} → {out_file.name}")
+        logger.info(f"🎬 FFmpeg concat: {len(chunks)} chunks → {out_file.name}")
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
             logger.info(f"✅ Saved: {out_file}")
@@ -130,8 +206,9 @@ async def upload_chunk(
     file: UploadFile = File(...),
     device_id: str = Form(...),
     session_id: str = Form(...),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Receive a media chunk from a camera and save it directly to disk."""
+    """Receive a media chunk from a live camera and process it."""
     logger.info(
         f"📥 /upload  device={device_id!r}  session={session_id!r}  "
         f"filename={file.filename!r}  active={current_active_session!r}"
@@ -146,7 +223,6 @@ async def upload_chunk(
 
     content = await file.read()
 
-    # Determine extension from the MIME type / filename — works for Safari MP4 and Chrome WebM
     original_name = file.filename or ""
     if original_name.lower().endswith(".mp4") or (file.content_type or "").startswith("video/mp4"):
         ext = ".mp4"
@@ -157,16 +233,74 @@ async def upload_chunk(
     idx = chunk_counters.get(device_id, 0)
     chunk_counters[device_id] = idx + 1
 
-    session_dir = CHUNKS_DIR / session_id
-    session_dir.mkdir(parents=True, exist_ok=True)
-    chunk_path = session_dir / f"{device_id}_chunk_{idx:04d}{ext}"
+    # Save to standard struct: storage/raw/{session_id}/chunk_{idx}/{device_id}.ext
+    session_dir = RAW_DIR / session_id
+    chunk_dir = session_dir / f"chunk_{idx}"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    
+    chunk_path = chunk_dir / f"{device_id}{ext}"
 
     try:
         with open(chunk_path, "wb") as f:
             f.write(content)
-        logger.info(f"✅ Saved chunk {idx:04d} for device={device_id}  size={len(content)} bytes  → {chunk_path.name}")
+        logger.info(f"✅ Saved chunk {idx:04d} for device={device_id}  size={len(content)} bytes  → {chunk_path}")
+        
+        # Insert into DB
+        try:
+            chunk_record = Chunk(
+                session_id=uuid.UUID(session_id),
+                chunk_index=idx,
+                cam_id=device_id,
+                file_path=str(chunk_path),
+                status="uploaded",
+            )
+            db.add(chunk_record)
+            await db.commit()
+        except Exception as db_err:
+            logger.error(f"❌ Failed to insert Chunk record to DB: {db_err}")
+
+        # Broadcast that a chunk was uploaded
+        await manager.broadcast(session_id, {
+            "type": "chunk_uploaded",
+            "session_id": session_id,
+            "chunk_index": idx,
+            "cam_id": device_id,
+        })
+
+        # Check if we should trigger Celery processing
+        if session_id not in uploaded_chunks:
+            uploaded_chunks[session_id] = {}
+        if idx not in uploaded_chunks[session_id]:
+            uploaded_chunks[session_id][idx] = set()
+            
+        uploaded_chunks[session_id][idx].add(device_id)
+
+        # Get expected cameras from DB
+        db_session = await db.get(Session, uuid.UUID(session_id))
+        expected_cams = db_session.camera_count if db_session else max(1, len(active_cameras))
+
+        if len(uploaded_chunks[session_id][idx]) >= expected_cams:
+            all_cam_ids = list(uploaded_chunks[session_id][idx])
+            logger.info(f"🚀 Triggering processing for session={session_id} chunk={idx} cams={all_cam_ids}")
+            
+            # Use sync_strategy from DB or default
+            sync_strategy = db_session.sync_strategy if db_session else "multividsynch"
+            
+            process_chunk_set.delay(
+                session_id=session_id,
+                chunk_index=idx,
+                cam_ids=all_cam_ids,
+                sync_strategy=sync_strategy,
+            )
+            
+            await manager.broadcast(session_id, {
+                "type": "processing_started",
+                "session_id": session_id,
+                "chunk_index": idx,
+            })
+
     except Exception as e:
-        logger.error(f"❌ Failed to save chunk for {device_id}: {e}")
+        logger.error(f"❌ Failed to process uploaded chunk for {device_id}: {e}", exc_info=True)
         return {"status": "error", "detail": str(e)}
 
     return {"status": "success", "chunk": idx, "size": len(content)}

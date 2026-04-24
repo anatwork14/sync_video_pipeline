@@ -1,6 +1,3 @@
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface Session {
@@ -8,6 +5,7 @@ export interface Session {
   name: string;
   camera_count: number;
   status: "recording" | "processing" | "completed" | "failed";
+  sync_strategy: string;
   created_at: string;
   updated_at: string;
 }
@@ -19,9 +17,12 @@ export interface Offset {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+// All paths are relative — Next.js rewrites forward them to the FastAPI backend.
+// This means the app works correctly both locally AND over Cloudflare tunnel
+// without needing NEXT_PUBLIC_API_URL baked into the build.
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(path, {
     headers: { "Content-Type": "application/json", ...init?.headers },
     ...init,
   });
@@ -41,10 +42,10 @@ export const api = {
 
     get: (id: string) => apiFetch<Session>(`/api/sessions/${id}`),
 
-    create: (name: string, cameraCount: number) =>
+    create: (name: string, cameraCount: number, syncStrategy: string = "multividsynch") =>
       apiFetch<Session>("/api/sessions", {
         method: "POST",
-        body: JSON.stringify({ name, camera_count: cameraCount }),
+        body: JSON.stringify({ name, camera_count: cameraCount, sync_strategy: syncStrategy }),
       }),
 
     delete: (id: string) =>

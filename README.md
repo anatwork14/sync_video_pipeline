@@ -1,149 +1,119 @@
 # 🎥 VideoSync Pipeline
 
-> **Multi-Camera Video Capture, Sync & Delivery Platform**  
-> Deadline (IoT Tier): **12/04/2026**
+> **Multi-Camera Real-Time Video Capture, Synchronization & Processing Platform**
+
+The **VideoSync Pipeline** is an advanced IoT/Cloud platform designed for multi-perspective video capture. It enables multiple devices (mobile phones, ESP32s, or web cams) to record synchronized video chunks, which are then aligned in real-time using audio cross-correlation and visual feature matching.
 
 ---
 
-## Architecture Overview
+## 🏗 Architecture & Data Flow
 
-```
-📱 Phone A ─┐
-📱 Phone B ─┼──► POST /upload-chunk ──► FastAPI ──► Celery Worker
-📱 Phone C ─┘                                           │
-                                                 Audio Cross-Corr
-                                                 + FFmpeg Sync
-                                                         │
-                                              storage/synced/chunk_N.mp4
-                                                         │
-                                         Next.js Dashboard ◄── WebSocket
-                                         (Status / Preview / Playback)
+### 1. Live Synchronization Flow
+Unlike traditional video processing that waits for a recording to finish, this pipeline uses a **per-chunk synchronization** strategy:
+
+1.  **Orchestration**: The Next.js Dashboard or an ESP32 trigger sends a `start` command via WebSockets to all connected cameras.
+2.  **Capture**: Each camera records small video chunks (e.g., 5-10 seconds) and uploads them immediately.
+3.  **State Management**: The FastAPI backend tracks incoming chunks in a PostgreSQL database.
+4.  **Automatic Trigger**: As soon as all expected cameras have uploaded the same chunk index (e.g., `chunk_0`), a Celery task is dispatched.
+5.  **Processing**:
+    *   **Audio Sync**: Discovery of precise temporal offsets using audio fingerprinting.
+    *   **FFmpeg Stitch**: Trimming and aligning videos based on discovered offsets.
+6.  **Delivery**: The synchronized chunk is saved to `storage/synced/` and can be previewed immediately on the dashboard.
+
+### 2. Storage Hierarchy
+```text
+backend/storage/
+├── raw/
+│   └── {session_id}/
+│       └── chunk_{index}/
+│           ├── cam_1.mp4
+│           └── cam_2.mp4
+├── synced/
+│   ├── chunk_{index}_synced.mp4  # Real-time output
+│   └── session_{id}_final.mp4    # Fallback full session
+└── temp/                         # Intermediate processing files
 ```
 
 ---
 
-## Tech Stack
+## 🛠 Tech Stack
 
 | Layer | Technology |
 |---|---|
-| Frontend | Next.js 15 (App Router + TypeScript) |
-| Backend API | FastAPI (Python 3.11) |
-| Task Queue | Celery + Redis |
-| Database | PostgreSQL + SQLAlchemy + Alembic |
-| Video Processing | FFmpeg + ffmpeg-python + scipy |
-| Storage | Local FS → MinIO/S3 (Phase 3) |
-| Real-time | WebSocket (Phase 1) → MediaMTX/HLS (Phase 2) |
-| Containers | Docker + Docker Compose |
-| Reverse Proxy | Nginx |
+| **Frontend** | Next.js 15 (App Router, TypeScript, Tailwind CSS) |
+| **Backend API** | FastAPI (Python 3.11, Pydantic v2) |
+| **Task Queue** | Celery + Redis |
+| **Database** | PostgreSQL + SQLAlchemy + Alembic |
+| **Video Engine** | FFmpeg + Scipy (Audio Analysis) + MultiVidSynch (CV) |
+| **Infrastructure** | Docker + Docker Compose + Nginx |
 
 ---
 
-## Project Structure
+## 🚀 Quick Start
 
-```
-video_sync_pipeline/
-├── backend/          # FastAPI + Celery workers
-├── frontend/         # Next.js dashboard
-├── nginx/            # Reverse proxy config
-├── docker-compose.yml
-└── README.md
-```
+### 1. Prerequisites
+- [Docker & Docker Compose](https://www.docker.com/)
+- [FFmpeg](https://ffmpeg.org/) (for local development without Docker)
 
----
-
-## Quick Start (Development)
-
-### Prerequisites
-- Docker & Docker Compose
-- Node.js 20+
-- Python 3.11+
-
-### 1. Clone & Configure
-
+### 2. Environment Setup
 ```bash
-git clone https://github.com/YOUR_ORG/video_sync_pipeline.git
-cd video_sync_pipeline
+# Clone the repository
+git clone https://github.com/teobun/sync_video_pipeline.git
+cd sync_video_pipeline
+
+# Create your environment file
 cp .env.example .env
-# Edit .env with your settings
 ```
+*Edit `.env` to configure your database credentials and storage paths if necessary.*
 
-### 2. Start All Services
-
+### 3. Launching the Services
+The easiest way to run the entire pipeline is via Docker Compose:
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-Services started:
-- `http://localhost:3000` — Next.js Dashboard
-- `http://localhost:8000` — FastAPI (docs at `/docs`)
-- `http://localhost:8000/ws/{session_id}` — WebSocket
-- PostgreSQL on port `5432`
-- Redis on port `6379`
-
-### 3. Run without Docker (development)
-
-**Backend:**
-```bash
-cd backend
-python -m venv venv
-venv\Scripts\activate   # Windows
-pip install -r requirements.txt
-alembic upgrade head
-uvicorn app.main:app --reload --port 8000
-# In another terminal:
-celery -A app.workers.celery_app worker --loglevel=info
-```
-
-**Frontend:**
-```bash
-cd frontend
-npm install
-npm run dev
-```
+**Services will be available at:**
+- **Dashboard**: `http://localhost:3000`
+- **Backend API**: `http://localhost:8000`
+- **Interactive Docs**: `http://localhost:8000/docs`
+- **Nginx Entry**: `http://localhost:80` (Proxies to frontend/backend)
 
 ---
 
-## API Reference
+## 📱 Using the System
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/upload-chunk` | Upload video chunk from camera |
-| `POST` | `/api/sessions` | Create recording session |
-| `GET` | `/api/sessions` | List sessions |
-| `GET` | `/api/sessions/{id}` | Session detail + chunk status |
-| `GET` | `/api/sessions/{id}/offsets` | Camera sync offsets |
-| `WS` | `/ws/{session_id}` | Real-time status updates |
+### Starting a Session
+1.  Open the **Dashboard** (`localhost:3000`).
+2.  Connect your cameras (using the Camera view on mobile or secondary tabs).
+3.  Click **"Start Recording"** on the dashboard.
+4.  Cameras will begin uploading chunks. Monitor the **Celery Logs** to see real-time processing:
+    ```bash
+    docker compose logs -f worker
+    ```
 
----
-
-## Development Phases
-
-| Phase | Feature | Status |
-|---|---|---|
-| **1 — MVP** | Chunk upload + audio sync + FFmpeg stitch | 🚧 In Progress |
-| **2 — Live** | Real-time RTMP/HLS streaming | 📋 Planned |
-| **3 — Scale** | S3 storage, K8s, auth | 📋 Planned |
+### WebSocket Events
+The system communicates state changes via `ws://localhost:8000/ws/{session_id}`:
+- `chunk_uploaded`: Fired when a camera finishes uploading a segment.
+- `processing_started`: Fired when a full set of chunks is ready for sync.
+- `chunk_done`: Fired when the synchronized segment is ready for viewing.
 
 ---
 
-## Team
+## 🛠 Troubleshooting
 
-| Role | Members |
-|---|---|
-| IoT / Mobile (CE) | Hào, Tú, Minh Trường |
-| Backend / CV (CS) | TBD |
-| Frontend (CS) | TBD |
+- **Connection Refused**: Ensure Docker services are healthy (`docker compose ps`).
+- **FFmpeg Error**: Check if the uploaded chunks have audio tracks; the `multividsynch` strategy relies on audio for initial alignment.
+- **WebSocket Timeout**: If using a tunnel (like Cloudflare or Ngrok), ensure the WebSocket protocol is enabled in the tunnel configuration.
 
 ---
 
-## Contributing
-
-1. Branch from `main` → `feature/your-feature`
-2. Run tests: `pytest backend/tests/`
-3. Open PR with description of changes
+## 👨‍💻 Project Structure
+- `backend/`: FastAPI application, Celery tasks, and database models.
+- `frontend/`: Next.js 15 dashboard for monitoring and session control.
+- `MultiVidSynch/`: Submodule containing core computer vision alignment algorithms.
+- `nginx/`: Configuration for the reverse proxy.
 
 ---
 
-## License
-
-MIT
+## 📄 License
+This project is licensed under the MIT License - see the LICENSE file for details.

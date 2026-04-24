@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 class SessionCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     camera_count: int = Field(default=3, ge=1, le=10)
+    sync_strategy: str = Field(default="multividsynch")
 
 
 class SessionOut(BaseModel):
@@ -15,6 +16,7 @@ class SessionOut(BaseModel):
     name: str
     camera_count: int
     status: str
+    sync_strategy: str
     created_at: datetime
     updated_at: datetime
 

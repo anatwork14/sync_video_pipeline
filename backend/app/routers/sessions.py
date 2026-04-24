@@ -15,7 +15,11 @@ router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 @router.post("", response_model=SessionOut, status_code=201)
 async def create_session(data: SessionCreate, db: AsyncSession = Depends(get_db)):
-    session = Session(name=data.name, camera_count=data.camera_count)
+    session = Session(
+        name=data.name,
+        camera_count=data.camera_count,
+        sync_strategy=data.sync_strategy,
+    )
     db.add(session)
     await db.commit()
     await db.refresh(session)

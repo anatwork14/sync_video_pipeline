@@ -152,7 +152,7 @@ export default function SessionDetailPage() {
           {/* Left Column: Player & History */}
           <div style={{ display: "flex", flexDirection: "column", gap: 32 }}>
             <SyncedPlayer
-              url={currentVideoUrl ? `http://localhost:8000${currentVideoUrl}` : ""}
+              url={currentVideoUrl ?? ""}
               title={`Live Monitor — Chunk #${processedChunks[processedChunks.length - 1] ?? "..."}`}
             />
 

@@ -75,6 +75,12 @@ export default function HomePage() {
               cta: "View Sessions",
             },
             {
+              title: "🎬 Simulate",
+              desc: "Upload pre-recorded videos to simulate multi-camera live sync.",
+              href: "/simulate",
+              cta: "Upload Videos",
+            },
+            {
               title: "🔴 Live Stream",
               desc: "Phase 2: Live multi-camera synchronized stream view using RTMP/HLS.",
               href: "/live",
