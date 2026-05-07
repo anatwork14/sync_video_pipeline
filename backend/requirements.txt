@@ -1,25 +1,42 @@
+# ── Web framework ──────────────────────────────────────────────────────────────
 fastapi==0.115.12
 uvicorn[standard]==0.34.0
 python-multipart==0.0.20
+
+# ── Database ───────────────────────────────────────────────────────────────────
 sqlalchemy[asyncio]==2.0.40
 asyncpg==0.30.0
 alembic==1.15.2
+
+# ── Validation & Config ────────────────────────────────────────────────────────
 pydantic==2.11.2
 pydantic-settings==2.8.1
+
+# ── Task Queue ─────────────────────────────────────────────────────────────────
 celery[redis]==5.5.1
 redis==5.2.1
+
+# ── Video / Audio Processing ───────────────────────────────────────────────────
 ffmpeg-python==0.2.0
 scipy==1.15.2
-numpy==2.2.4
+numpy==2.1.1
 librosa==0.10.2
+opencv-python-headless==4.10.0.84
+
+# ── ML / SeSyn-Net ─────────────────────────────────────────────────────────────
+# torch: CPU-only image kept lean; GPU users should install with CUDA extras
+torch==2.6.0
+ultralytics==8.3.108
+scikit-learn==1.6.1
+
+# ── Utilities ──────────────────────────────────────────────────────────────────
 python-jose[cryptography]==3.3.0
 httpx==0.28.1
 aiofiles==24.1.0
 python-magic==0.4.27
+tqdm==4.67.1
+
+# ── Dev / Test ─────────────────────────────────────────────────────────────────
 ruff==0.9.10
 pytest==8.3.5
 pytest-asyncio==0.25.3
-httpx==0.28.1
-opencv-python-headless==4.10.0.84
-scikit-learn==1.6.1
-tqdm==4.67.1

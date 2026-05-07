@@ -20,14 +20,31 @@ export default function SessionDetailPage() {
 
   const { data: session, error, isLoading, mutate } = useSWR(id ? `session-${id}` : null, () => fetcher(id));
   const { data: offsets } = useSWR(id ? `offsets-${id}` : null, () => offsetFetcher(id));
+  const { data: initialChunks } = useSWR(id ? `chunks-${id}` : null, () => api.sessions.chunks(id));
   const { events, connected } = useWebSocket(id);
 
   const [currentVideoUrl, setCurrentVideoUrl] = useState<string | null>(null);
   const [processedChunks, setProcessedChunks] = useState<number[]>([]);
+  const [chunkProgress, setChunkProgress] = useState<Record<number, string>>({});
   const [deleting, setDeleting] = useState(false);
 
   // Monitor events for toast notifications and player updates
   useEffect(() => {
+    setChunkProgress(prev => {
+      const next = { ...prev };
+      let changed = false;
+      events.forEach(ev => {
+        if (ev.chunk_index !== undefined && ["processing_started", "computing_offsets", "aligning", "stitching", "chunk_done", "error"].includes(ev.type)) {
+          if (next[ev.chunk_index] === "chunk_done" || next[ev.chunk_index] === "error") return;
+          if (next[ev.chunk_index] !== ev.type) {
+            next[ev.chunk_index] = ev.type;
+            changed = true;
+          }
+        }
+      });
+      return changed ? next : prev;
+    });
+
     const lastEvent = events[events.length - 1];
     if (!lastEvent) return;
 
@@ -51,6 +68,26 @@ export default function SessionDetailPage() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [events]);
+
+  useEffect(() => {
+    if (initialChunks && initialChunks.length > 0) {
+      setProcessedChunks(prev => {
+        const set = new Set([...prev, ...initialChunks]);
+        return Array.from(set).sort((a,b) => a-b);
+      });
+      setChunkProgress(prev => {
+        const next = { ...prev };
+        let changed = false;
+        initialChunks.forEach(idx => {
+          if (next[idx] !== "chunk_done") {
+             next[idx] = "chunk_done";
+             changed = true;
+          }
+        });
+        return changed ? next : prev;
+      });
+    }
+  }, [initialChunks]);
 
   const handleDelete = async () => {
     if (!session) return;
@@ -152,7 +189,7 @@ export default function SessionDetailPage() {
           {/* Left Column: Player & History */}
           <div style={{ display: "flex", flexDirection: "column", gap: 32 }}>
             <SyncedPlayer
-              url={currentVideoUrl ?? ""}
+              url={currentVideoUrl}
               title={`Live Monitor — Chunk #${processedChunks[processedChunks.length - 1] ?? "..."}`}
             />
 
@@ -164,33 +201,71 @@ export default function SessionDetailPage() {
                 </span>
               </div>
               
-              {processedChunks.length === 0 ? (
+              {Object.keys(chunkProgress).length === 0 ? (
                 <div style={{ color: "var(--text-muted)", fontSize: 14, textAlign: "center", padding: "60px 20px", border: "1px dashed var(--border)", borderRadius: "var(--radius-sm)" }}>
                   <div style={{ fontSize: 32, marginBottom: 12 }}>⏳</div>
                   No synced chunks yet.<br/>Ensure capture nodes are actively uploading.
                 </div>
               ) : (
-                <div className="grid-4">
-                  {processedChunks.map((idx) => {
+                <div className="grid-4" style={{ gridTemplateColumns: "1fr" }}>
+                  {Object.entries(chunkProgress).sort(([a], [b]) => Number(a) - Number(b)).map(([idxStr, status]) => {
+                    const idx = Number(idxStr);
                     const isActive = currentVideoUrl?.includes(`synced_chunk_${idx}.mp4`);
+                    const isDone = status === "chunk_done";
+                    const isError = status === "error";
+                    
+                    const progressSteps = ["processing_started", "computing_offsets", "aligning", "stitching", "chunk_done"];
+                    let progressIndex = progressSteps.indexOf(status);
+                    if (progressIndex === -1) progressIndex = 0;
+                    const progressPercent = isError ? 100 : ((progressIndex + 1) / progressSteps.length) * 100;
+                    
                     return (
-                      <button
-                        key={idx}
-                        className={`card interactive ${isActive ? "active" : ""}`}
-                        onClick={() => setCurrentVideoUrl(`/static/synced/${session.id}/synced_chunk_${idx}.mp4`)}
-                        style={{
-                          padding: 16,
-                          textAlign: "center",
-                          background: isActive ? "rgba(59,130,246,0.15)" : "rgba(0,0,0,0.2)",
-                          borderColor: isActive ? "var(--accent-blue)" : "var(--border)",
-                          boxShadow: isActive ? "var(--shadow-glow)" : "none",
-                        }}
-                      >
-                        <div style={{ fontSize: 24, marginBottom: 8, opacity: isActive ? 1 : 0.7 }}>🎞️</div>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: isActive ? "var(--text-primary)" : "var(--text-secondary)" }}>
-                          CHUNK #{idx}
-                        </div>
-                      </button>
+                      <div key={idx} style={{ marginBottom: 12 }}>
+                        <button
+                          className={`card interactive ${isActive ? "active" : ""}`}
+                          onClick={() => { if (isDone) setCurrentVideoUrl(`/static/synced/${session.id}/synced_chunk_${idx}.mp4`) }}
+                          disabled={!isDone}
+                          style={{
+                            width: "100%",
+                            padding: 16,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            background: isActive ? "rgba(59,130,246,0.15)" : "rgba(0,0,0,0.2)",
+                            borderColor: isActive ? "var(--accent-blue)" : (isError ? "var(--accent-red)" : "var(--border)"),
+                            boxShadow: isActive ? "var(--shadow-glow)" : "none",
+                            cursor: isDone ? "pointer" : "default",
+                            opacity: isDone || isError ? 1 : 0.8
+                          }}
+                        >
+                          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                            <div style={{ fontSize: 24, opacity: isDone ? 1 : 0.5 }}>{isError ? "❌" : (isDone ? "🎞️" : "⏳")}</div>
+                            <div style={{ textAlign: "left" }}>
+                              <div style={{ fontSize: 13, fontWeight: 700, color: isActive ? "var(--text-primary)" : "var(--text-secondary)" }}>
+                                CHUNK #{idx}
+                              </div>
+                              <div style={{ fontSize: 11, color: isError ? "var(--accent-red)" : "var(--text-muted)", marginTop: 2 }}>
+                                {isError ? "Error" : status.replace("_", " ").toUpperCase()}
+                              </div>
+                            </div>
+                          </div>
+                          {!isDone && !isError && (
+                            <div className="skeleton pulse" style={{ width: 24, height: 24, borderRadius: "50%", background: "var(--accent-blue)" }} />
+                          )}
+                        </button>
+                        
+                        {/* Progress Bar */}
+                        {!isDone && !isError && (
+                          <div style={{ width: "100%", height: 4, background: "rgba(255,255,255,0.1)", borderRadius: 2, marginTop: 4, overflow: "hidden" }}>
+                            <div style={{ height: "100%", width: `${progressPercent}%`, background: "var(--accent-blue)", transition: "width 0.3s ease" }} />
+                          </div>
+                        )}
+                        {isError && (
+                          <div style={{ width: "100%", height: 4, background: "rgba(255,255,255,0.1)", borderRadius: 2, marginTop: 4, overflow: "hidden" }}>
+                            <div style={{ height: "100%", width: "100%", background: "var(--accent-red)" }} />
+                          </div>
+                        )}
+                      </div>
                     );
                   })}
                 </div>

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 interface SyncedPlayerProps {
-  url: string;
+  url: string | null;
   title?: string;
   onEnded?: () => void;
 }
@@ -78,7 +78,7 @@ export default function SyncedPlayer({ url, title, onEnded }: SyncedPlayerProps)
           objectFit: "contain",
         }}
       >
-        <source src={url} type="video/mp4" />
+        {url && <source src={url} type="video/mp4" />}
         Your browser does not support the video tag.
       </video>
 

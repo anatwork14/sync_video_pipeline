@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import Session, Offset
 from app.schemas import SessionCreate, SessionOut, OffsetOut
+from app.diag_logger import log_diag
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -15,15 +16,26 @@ router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 @router.post("", response_model=SessionOut, status_code=201)
 async def create_session(data: SessionCreate, db: AsyncSession = Depends(get_db)):
-    session = Session(
-        name=data.name,
-        camera_count=data.camera_count,
-        sync_strategy=data.sync_strategy,
-    )
-    db.add(session)
-    await db.commit()
-    await db.refresh(session)
-    return session
+    try:
+        log_diag(f"📝 Received request to create session: {data.name} ({data.camera_count} cams)")
+        logger.info(f"Creating session: name={data.name}, cams={data.camera_count}")
+        session = Session(
+            name=data.name,
+            camera_count=data.camera_count,
+            sync_strategy=data.sync_strategy,
+            layout=data.layout,
+        )
+        db.add(session)
+        await db.commit()
+        await db.refresh(session)
+        log_diag(f"✅ Session created successfully in DB: {session.id}")
+        logger.info(f"✅ Session created: {session.id}")
+        return session
+    except Exception as e:
+        log_diag(f"❌ ERROR in create_session: {e}")
+        logger.error(f"❌ Failed to create session in DB: {e}", exc_info=True)
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
 @router.get("", response_model=list[SessionOut])
@@ -32,10 +44,26 @@ async def list_sessions(
     limit: int = 20,
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(Session).order_by(Session.created_at.desc()).offset(skip).limit(limit)
-    )
-    return result.scalars().all()
+    try:
+        log_diag(f"🔍 Listing sessions: skip={skip}, limit={limit}")
+        result = await db.execute(
+            select(Session).order_by(Session.created_at.desc()).offset(skip).limit(limit)
+        )
+        items = result.scalars().all()
+        log_diag(f"✅ Found {len(items)} sessions")
+        
+        from fastapi.encoders import jsonable_encoder
+        import json
+        
+        serialized = jsonable_encoder(items)
+        log_diag(f"📝 Full Response Body: {json.dumps(serialized)}")
+        
+        return items
+    except Exception as e:
+        log_diag(f"❌ ERROR in list_sessions: {e}")
+        import traceback
+        log_diag(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{session_id}", response_model=SessionOut)
@@ -52,6 +80,23 @@ async def get_offsets(session_id: UUID, db: AsyncSession = Depends(get_db)):
         select(Offset).where(Offset.session_id == session_id)
     )
     return result.scalars().all()
+
+
+@router.get("/{session_id}/chunks")
+async def get_chunks(session_id: UUID):
+    from pathlib import Path
+    from app.config import get_settings
+    settings = get_settings()
+    synced_dir = Path(settings.storage_base) / "synced" / str(session_id)
+    if not synced_dir.exists():
+        return []
+    chunks = []
+    for file in synced_dir.glob("synced_chunk_*.mp4"):
+        name = file.stem
+        parts = name.split("_")
+        if len(parts) >= 3 and parts[2].isdigit():
+            chunks.append(int(parts[2]))
+    return sorted(list(set(chunks)))
 
 
 @router.delete("/{session_id}", status_code=204)

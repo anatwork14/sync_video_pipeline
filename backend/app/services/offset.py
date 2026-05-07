@@ -15,12 +15,14 @@ settings = get_settings()
 
 def _extract_audio_wav(video_path: Path, out_wav: Path) -> None:
     """Extract mono 16kHz audio from a video file using FFmpeg."""
+    video_path = video_path.resolve()
+    out_wav = out_wav.resolve()
     (
         ffmpeg
         .input(str(video_path))
         .output(str(out_wav), ar=16000, ac=1, format="wav")
         .overwrite_output()
-        .run(quiet=True)
+        .run(capture_stdout=True, capture_stderr=True)
     )
 
 
@@ -34,45 +36,85 @@ def compute_offsets(chunk_dir: Path, cam_ids: list[str], reference_cam: str = No
         reference_cam: the reference camera (default: first in list)
 
     Returns:
-        dict mapping cam_id → offset_seconds (positive = this cam is LATE)
+        dict mapping cam_id -> offset_seconds (positive = this cam is LATE)
+
+    Raises:
+        FileNotFoundError: if a video file is missing
+        ValueError: if audio is silent/missing (triggers AutoSync fallback)
     """
     if reference_cam is None:
         reference_cam = cam_ids[0]
 
-    # Extract audio for each camera
     audio_data: dict[str, np.ndarray] = {}
     sample_rate: int = 16000
+    wav_paths_to_cleanup: list[Path] = []
 
-    for cam_id in cam_ids:
-        video_path = chunk_dir / f"{cam_id}.mp4"
-        wav_path = chunk_dir / f"{cam_id}_audio.wav"
-        _extract_audio_wav(video_path, wav_path)
-        sr, data = wavfile.read(str(wav_path))
-        sample_rate = sr
-        # Normalize to float32
-        audio_data[cam_id] = data.astype(np.float32) / np.iinfo(data.dtype).max
+    try:
+        for cam_id in cam_ids:
+            # Try multiple extensions: .webm (sim), .mp4 (live), .mov, etc.
+            video_path = None
+            for ext in [".webm", ".mp4", ".mov", ".mkv"]:
+                test_path = (chunk_dir / f"{cam_id}{ext}").resolve()
+                if test_path.exists():
+                    video_path = test_path
+                    break
 
-    ref_audio = audio_data[reference_cam]
-    offsets: dict[str, float] = {}
+            if not video_path:
+                error_msg = f"No input file found for camera {cam_id} in {chunk_dir} (tried .webm, .mp4, etc.)"
+                logger.error(error_msg)
+                raise FileNotFoundError(error_msg)
 
-    for cam_id in cam_ids:
-        if cam_id == reference_cam:
-            offsets[cam_id] = 0.0
-            continue
+            wav_path = chunk_dir / f"{cam_id}_audio.wav"
+            wav_paths_to_cleanup.append(wav_path)
+            _extract_audio_wav(video_path, wav_path)
+            sr, data = wavfile.read(str(wav_path))
+            sample_rate = sr
 
-        cam_audio = audio_data[cam_id]
+            # Normalize to float32 — handle both integer and float PCM formats
+            if np.issubdtype(data.dtype, np.integer):
+                audio_norm = data.astype(np.float32) / np.iinfo(data.dtype).max
+            else:
+                # Already float (e.g. float32 PCM from some containers)
+                audio_norm = data.astype(np.float32)
 
-        # Cross-correlate
-        correlation = correlate(ref_audio, cam_audio, mode="full")
-        lag_samples = correlation.argmax() - (len(cam_audio) - 1)
-        offset_seconds = lag_samples / sample_rate
+            # Validate audio is not silent — silent audio gives unreliable correlations
+            rms = float(np.sqrt(np.mean(audio_norm ** 2)))
+            if rms < 1e-6:
+                raise ValueError(
+                    f"Audio for camera {cam_id} appears to be silent (RMS={rms:.2e}). "
+                    "Cannot reliably compute audio-based offsets."
+                )
 
-        # Positive offset means this cam needs to be trimmed by offset_seconds
-        # (it started recording BEFORE the reference by that amount)
-        offsets[cam_id] = float(offset_seconds)
-        logger.info(f"Offset {cam_id} vs {reference_cam}: {offset_seconds:.4f}s")
+            audio_data[cam_id] = audio_norm
 
-    return offsets
+        ref_audio = audio_data[reference_cam]
+        offsets: dict[str, float] = {}
+
+        for cam_id in cam_ids:
+            if cam_id == reference_cam:
+                offsets[cam_id] = 0.0
+                continue
+
+            cam_audio = audio_data[cam_id]
+
+            # Cross-correlate
+            correlation = correlate(ref_audio, cam_audio, mode="full")
+            lag_samples = int(correlation.argmax()) - (len(cam_audio) - 1)
+            offset_seconds = lag_samples / sample_rate
+
+            offsets[cam_id] = float(offset_seconds)
+            logger.info(f"Offset {cam_id} vs {reference_cam}: {offset_seconds:.4f}s")
+
+        return offsets
+
+    finally:
+        # Always clean up temp WAV files to prevent disk leaks
+        for wav_path in wav_paths_to_cleanup:
+            try:
+                if wav_path.exists():
+                    wav_path.unlink()
+            except OSError as e:
+                logger.warning(f"Could not remove temp WAV file {wav_path}: {e}")
 
 
 def save_offsets(offsets: dict[str, float], session_dir: Path) -> Path:

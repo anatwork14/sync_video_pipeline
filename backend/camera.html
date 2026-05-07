@@ -71,7 +71,7 @@
                     // Chain the fetches together. 
                     // This waits for the previous upload to finish before starting this one.
                     uploadQueue = uploadQueue.then(() => {
-                        return fetch('/upload', { method: 'POST', body: formData });
+                        return fetch('/api/live/upload', { method: 'POST', body: formData });
                     }).catch((err) => {
                         console.error("Upload failed:", err);
                     });

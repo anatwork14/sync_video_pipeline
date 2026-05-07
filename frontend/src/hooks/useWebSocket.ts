@@ -24,7 +24,12 @@ export function useWebSocket(sessionId: string | null) {
     // This works correctly both on localhost AND through Cloudflare tunnel
     // without needing a baked NEXT_PUBLIC_WS_URL env var.
     const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${wsProtocol}//${window.location.host}/ws/${sessionId}`;
+    let wsHost = window.location.host;
+    // If accessing frontend directly on port 3000, route WS to backend port 8000
+    if (window.location.port === "3000") {
+      wsHost = `${window.location.hostname}:8000`;
+    }
+    const wsUrl = `${wsProtocol}//${wsHost}/ws/${sessionId}`;
 
     ws.current = new WebSocket(wsUrl);
 
@@ -66,7 +71,8 @@ export function useWebSocket(sessionId: string | null) {
 
   useEffect(() => {
     const cleanup = connect();
-    return cleanup;
+    // connect() returns undefined when sessionId is null — guard it
+    return () => { if (cleanup) cleanup(); };
   }, [connect]);
 
   return { events, connected };

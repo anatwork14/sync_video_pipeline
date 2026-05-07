@@ -42,7 +42,7 @@ export const api = {
 
     get: (id: string) => apiFetch<Session>(`/api/sessions/${id}`),
 
-    create: (name: string, cameraCount: number, syncStrategy: string = "multividsynch") =>
+    create: (name: string, cameraCount: number, syncStrategy: string = "auto") =>
       apiFetch<Session>("/api/sessions", {
         method: "POST",
         body: JSON.stringify({ name, camera_count: cameraCount, sync_strategy: syncStrategy }),
@@ -52,6 +52,8 @@ export const api = {
       apiFetch<void>(`/api/sessions/${id}`, { method: "DELETE" }),
 
     offsets: (id: string) => apiFetch<Offset[]>(`/api/sessions/${id}/offsets`),
+
+    chunks: (id: string) => apiFetch<number[]>(`/api/sessions/${id}/chunks`),
   },
 
   health: () => apiFetch<{ status: string }>("/health"),

@@ -81,13 +81,13 @@ def resize_frame(frame, desired_width=2500):
     return resized_frame
 
 
-def match_first_frames():
+def main():
     # Define ROI parameters
     left_percent = 0.15  # Adjust this to change the left coverage
     
-    # Using scene1611 as requested
-    video1_path = '/Users/teobun/Desktop/ai-integreated/MultiVidSynch/syncam_500_videos/SynCamVideo-Dataset/train/f24_aperture5/scene1611/videos/cam01.mp4'
-    video2_path = '/Users/teobun/Desktop/ai-integreated/MultiVidSynch/syncam_500_videos/SynCamVideo-Dataset/train/f24_aperture5/scene1611/videos/cam02.mp4'
+    # Placeholder paths for demonstration/testing
+    video1_path = 'path/to/cam01.mp4'
+    video2_path = 'path/to/cam02.mp4'
     video_paths = [
         video1_path,
         video2_path,
@@ -97,10 +97,14 @@ def match_first_frames():
     first_frame_keypoints = []
     first_frame_descriptors = []
     first_frames = []
-    first_frames_keypoints_images = []  # Add this line
+    first_frames_keypoints_images = []
     
     # Extract features from the first frame of each video
     for video_path in video_paths:
+        if not os.path.exists(video_path):
+            print(f"Skipping non-existent test video: {video_path}")
+            continue
+            
         video = cv2.VideoCapture(video_path)
         ret, frame = video.read()
         if ret:
@@ -110,44 +114,30 @@ def match_first_frames():
             roi_width = width - roi_start_x
             roi_start = (0, roi_start_x)
             roi_size = (roi_height, roi_width)
-            keypoints, descriptors, img_keypoints = extract_features_from_frame(frame, roi_start, roi_size)  # Modify this line
+            keypoints, descriptors, img_keypoints = extract_features_from_frame(frame, roi_start, roi_size)
             first_frame_keypoints.append(keypoints)
             first_frame_descriptors.append(descriptors)
             first_frames.append(frame)
-            first_frames_keypoints_images.append(img_keypoints)  # Add this line
+            first_frames_keypoints_images.append(img_keypoints)
         video.release()
     
+    if len(first_frame_descriptors) < 2:
+        print("Need at least 2 videos to match features.")
+        return None, None
+
     # Match features between the first frames
     matches = match_features(first_frame_descriptors[0], first_frame_descriptors[1])
     print("Number of good matches:", len(matches))
+    
     # Compute the fundamental matrix
     points1 = np.float32([first_frame_keypoints[0][m.queryIdx].pt for m in matches])
     points2 = np.float32([first_frame_keypoints[1][m.trainIdx].pt for m in matches])
     F, _ = cv2.findFundamentalMat(points1, points2, cv2.FM_RANSAC)
     
-    # Draw the matches
-    img_matches = cv2.drawMatches(first_frames[0], first_frame_keypoints[0], first_frames[1], first_frame_keypoints[1], matches, None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
-    
-    # # Display the image with matches using OpenCV
-    # resized_frame = resize_frame(img_matches)
-
-    # cv2.imshow("Matched Features", resized_frame)
-    # cv2.waitKey(0)  # Wait indefinitely until a key is pressed
-    # cv2.imshow("Keypoints", img_keypoints)
-    # cv2.destroyAllWindows()  # Close the window
-
-    # # At the end of the function, display the images with keypoints
-    # for i, img in enumerate(first_frames_keypoints_images):
-    #     resized_frame = resize_frame(img)
-    #     cv2.imshow(f"Video {i+1} - Keypoints", resized_frame)
-
-    # cv2.waitKey(0)  # Wait indefinitely until a key is pressed
-    # cv2.destroyAllWindows()  # Close the window
-
     return F, matches
 
-# Run the function
-F, matches = match_first_frames()
+if __name__ == "__main__":
+    F, matches = main()
 
 
 

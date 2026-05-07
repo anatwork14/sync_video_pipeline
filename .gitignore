@@ -66,3 +66,5 @@ desktop.ini
 *.key
 *.crt
 secrets/
+.lt_subdomain
+backend/app/services/sesyn_net_approach/Sync-Camera/

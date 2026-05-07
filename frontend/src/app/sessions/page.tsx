@@ -26,7 +26,7 @@ export default function SessionsPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [camCount, setCamCount] = useState(3);
-  const [syncStrategy, setSyncStrategy] = useState("multividsynch");
+  const [syncStrategy, setSyncStrategy] = useState("auto");
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
@@ -107,8 +107,9 @@ export default function SessionsPage() {
                 onChange={(e) => setSyncStrategy(e.target.value)}
                 disabled={creating}
               >
-                <option value="multividsynch">MultiVidSynch (Feature)</option>
-                <option value="audio">Audio</option>
+                <option value="auto">Auto</option>
+                <option value="multividsynch">MultiVidSynch</option>
+                <option value="sesyn_net">SeSyn-Net</option>
               </select>
             </div>
             <button
@@ -169,7 +170,7 @@ export default function SessionsPage() {
                     <span style={{ color: "var(--accent-fuchsia)" }}>📱</span> {session.camera_count} Cameras
                   </span>
                   <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ color: "var(--accent-blue)" }}>⚙️</span> {session.sync_strategy === "audio" ? "Audio" : "MultiVidSynch"}
+                    <span style={{ color: "var(--accent-blue)" }}>⚙️</span> {session.sync_strategy === "sesyn_net" ? "SeSyn-Net" : session.sync_strategy === "auto" ? "Auto Sync" : "MultiVidSynch"}
                   </span>
                   <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={{ color: "var(--accent-blue)" }}>🕒</span>

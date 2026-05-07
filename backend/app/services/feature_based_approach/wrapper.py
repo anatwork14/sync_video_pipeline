@@ -20,14 +20,28 @@ logger = logging.getLogger(__name__)
 
 def compute_feature_offsets(chunk_dir: Path, cam_ids: list[str]) -> dict[str, float]:
     """
-    Computes offsets using the MultiVidSynch (OTP) feature-based approach.
-    Since OTP.py calculates offset in frames, we will convert it to seconds.
-    Assuming 30 FPS for now (or read from video).
+    Computes offsets using a feature-based (CV) alignment approach.
+    This method analyzes visual landmarks across cameras to determine temporal shifts.
+    Since the core algorithm calculates offset in frames, we convert it to seconds
+    based on the video's framerate.
     """
     if not cam_ids:
         return {}
 
-    CAPTURE_FILES = [chunk_dir / f"{cam_id}.mp4" for cam_id in cam_ids]
+    CAPTURE_FILES = []
+    for cam_id in cam_ids:
+        # Try multiple extensions
+        video_path = None
+        for ext in [".webm", ".mp4", ".mov", ".mkv"]:
+            test_path = (chunk_dir / f"{cam_id}{ext}").resolve()
+            if test_path.exists():
+                video_path = test_path
+                break
+        
+        if video_path:
+            CAPTURE_FILES.append(video_path)
+        else:
+            logger.warning(f"No input file found for camera {cam_id} in {chunk_dir}")
     
     # Check if files exist
     valid_files = [f for f in CAPTURE_FILES if f.exists()]
