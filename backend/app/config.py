@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     # Storage
-    storage_base: str = "./storage"
+    storage_base: str = "../storage"
 
     # Upload limits
     max_upload_size_mb: int = 500

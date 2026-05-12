@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.workers.celery_app import celery_app
-from app.services.sync_pipeline import run_sync_pipeline
+from app.services.sync_pipeline import run_sync_pipeline, run_full_sync_pipeline
 from app.services.master_pipeline import run_master_pipeline
 from app.services.stitching import StitchLayout
 from app.ws.redis_bridge import publish_event_sync
@@ -192,5 +192,57 @@ def produce_master_video(
             "type": "master_error",
             "session_id": session_id,
             "message": f"Master render failed: {error_msg}",
+        })
+        raise self.retry(exc=exc)
+
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=10)
+def process_full_session(
+    self,
+    session_id: str,
+    cam_ids: list[str],
+    layout: str = "hstack",
+    sync_strategy: str = "auto",
+) -> dict:
+    """
+    Process the full session: concat chunks -> sync full videos.
+    """
+    try:
+        log_diag(f"👷 [Full Task] STARTING: session={session_id} strategy={sync_strategy}")
+        logger.info(f"[Full Task] Processing session={session_id} cams={cam_ids} strategy={sync_strategy}")
+
+        output_path = run_full_sync_pipeline(
+            session_id=session_id,
+            cam_ids=cam_ids,
+            layout=StitchLayout(layout),
+            strategy_name=sync_strategy,
+        )
+
+        relative_url = f"/static/synced/{session_id}/{output_path.name}"
+
+        publish_event_sync({
+            "type": "session_done",
+            "session_id": session_id,
+            "url": relative_url,
+        })
+
+        log_diag(f"✅ [Full Task] COMPLETED: session={session_id} -> {output_path}")
+        logger.info(f"[Full Task] ✅ session done → {output_path}")
+
+        return {
+            "status": "completed",
+            "session_id": session_id,
+            "output": str(output_path),
+            "strategy_used": sync_strategy,
+            "url": relative_url,
+        }
+
+    except Exception as exc:
+        log_diag(f"❌ [Full Task] FAILED: session={session_id}: {exc}")
+        logger.error(f"[Full Task] Failed session={session_id}: {exc}", exc_info=True)
+        publish_event_sync({
+            "type": "error",
+            "session_id": session_id,
+            "message": str(exc),
         })
         raise self.retry(exc=exc)
