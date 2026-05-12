@@ -112,7 +112,7 @@ def is_valid_video(input_path: Path) -> bool:
         return False
 
 
-def align_chunk(input_path: Path, output_path: Path, offset_seconds: float, chunk_index: int = 0) -> None:
+def align_chunk(input_path: Path, output_path: Path, offset_seconds: float, chunk_index: int | None = 0) -> None:
     """
     Trim a video chunk to align it with the reference camera.
     """
@@ -129,7 +129,7 @@ def align_chunk(input_path: Path, output_path: Path, offset_seconds: float, chun
         
         # Try to find the header (chunk_0) for this device
         header_path = None
-        if chunk_index > 0:
+        if chunk_index is not None and chunk_index > 0:
             # chunk_dir is session/chunk_N/
             # header is in session/chunk_0/
             session_dir = input_path.parent.parent

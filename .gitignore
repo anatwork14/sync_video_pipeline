@@ -68,3 +68,4 @@ desktop.ini
 secrets/
 .lt_subdomain
 backend/app/services/sesyn_net_approach/Sync-Camera/
+cloudflared.exe

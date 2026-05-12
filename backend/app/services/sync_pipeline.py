@@ -128,11 +128,10 @@ def run_full_sync_pipeline(
     })
     strategy = get_sync_strategy(strategy_name)
     
-    video_paths = {}
     for cam_id, path in full_videos.items():
         new_path = session_dir / f"{cam_id}.mp4"
-        path.rename(new_path)
-        video_paths[cam_id] = new_path
+        if path != new_path:
+            path.rename(new_path)
 
     offsets = strategy.compute_offsets(session_dir, cam_ids)
     save_offsets(offsets, session_dir)
@@ -145,7 +144,18 @@ def run_full_sync_pipeline(
         "session_id": session_id,
         "message": "Trimming and aligning video streams...",
     })
-    aligned_paths = align_all_chunks(session_dir, aligned_dir, offsets)
+    
+    from app.services.alignment import align_chunk
+    aligned_paths = {}
+    for cam_id, offset in offsets.items():
+        input_path = session_dir / f"{cam_id}.mp4"
+        output_path = aligned_dir / f"{cam_id}_aligned.mp4"
+        if input_path.exists():
+            align_chunk(input_path, output_path, offset, chunk_index=None)
+            aligned_paths[cam_id] = output_path
+        else:
+            logger.warning(f"[{session_id}] Could not find input path for alignment: {input_path}")
+
 
     # Step 4: Stitch
     logger.info(f"[{session_id}] Stitching with layout={layout}...")

@@ -4,6 +4,7 @@ from enum import Enum
 
 import ffmpeg
 from app.config import get_settings
+from app.diag_logger import log_diag
 
 logger = logging.getLogger(__name__)
 

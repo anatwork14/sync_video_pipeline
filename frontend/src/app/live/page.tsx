@@ -15,6 +15,10 @@ export default function LivePage() {
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [syncStrategy, setSyncStrategy] = useState("auto");
   const [finalizeError, setFinalizeError] = useState<string | null>(null);
+  const [masterReady, setMasterReady] = useState(false); // chunks done, master can be triggered
+  const [isTriggering, setIsTriggering] = useState(false);
+  const chunksDoneRef = useRef<Set<number>>(new Set());
+  const chunksExpectedRef = useRef<number | null>(null); // set when finalize response arrives
 
   // Phase-1 preview chunks
   const [previewChunks, setPreviewChunks] = useState<{ index: number; url: string }[]>([]);
@@ -106,6 +110,14 @@ export default function LivePage() {
               if (exists) return prev;
               return [...prev, { index: data.chunk_index, url: data.url }].sort((a, b) => a.index - b.index);
             });
+            // Track done chunks — when all expected are done, enable master trigger
+            chunksDoneRef.current.add(data.chunk_index);
+            if (
+              chunksExpectedRef.current !== null &&
+              chunksDoneRef.current.size >= chunksExpectedRef.current
+            ) {
+              setMasterReady(true);
+            }
           } else if (data.type === "master_started") {
             setMasterStatus("processing");
           } else if (data.type === "master_done") {
@@ -143,8 +155,12 @@ export default function LivePage() {
       setIsRecording(true);
       setPreviewChunks([]);
       setMasterStatus("idle");
+      setMasterReady(false);
+      setIsTriggering(false);
       setMasterUrl(null);
       setMasterError(null);
+      chunksDoneRef.current = new Set();
+      chunksExpectedRef.current = null;
       wsRef.current.send(JSON.stringify({ command: "start", session_id: sid }));
     }
   };
@@ -173,9 +189,11 @@ export default function LivePage() {
             const errText = await res.text();
             throw new Error(`Finalize failed: ${errText}`);
           }
+          const data = await res.json();
+          // Set how many chunks we expect to be done before enabling master
+          chunksExpectedRef.current = data.processed_count ?? null;
           setIsFinalizing(false);
-          // Start polling for master status (fallback if WS misses the event)
-          startMasterPolling(sessionId);
+          // Do NOT start master polling yet — wait for user to click trigger
         } catch (err: any) {
           console.error("Failed to finalize session:", err);
           setFinalizeError(err.message || "Failed to finalize session. Please retry.");
@@ -187,6 +205,36 @@ export default function LivePage() {
     } else if (wsRef.current?.readyState === WebSocket.OPEN) {
       setIsRecording(false);
       wsRef.current.send(JSON.stringify({ command: "stop" }));
+    }
+  };
+
+  const handleTriggerMaster = async () => {
+    if (!sessionId) return;
+    setIsTriggering(true);
+    setMasterStatus("pending");
+    setMasterError(null);
+    const camIds = cameras.map(c => c.id).join(",");
+    const formData = new URLSearchParams();
+    formData.append("session_id", sessionId);
+    formData.append("selected_cameras", camIds);
+    formData.append("layout", "hstack");
+    try {
+      const res = await fetch("/api/live/trigger-master", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: formData.toString()
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Trigger failed: ${errText}`);
+      }
+      setMasterReady(false);
+      startMasterPolling(sessionId);
+    } catch (err: any) {
+      setMasterStatus("failed");
+      setMasterError(err.message || "Failed to trigger master render.");
+    } finally {
+      setIsTriggering(false);
     }
   };
 
@@ -275,6 +323,27 @@ export default function LivePage() {
             >
               {isFinalizing ? "⏹ PROCESSING..." : "⏹ STOP & SYNC"}
             </button>
+            {masterReady && masterStatus === "idle" && (
+              <button
+                onClick={handleTriggerMaster}
+                disabled={isTriggering}
+                style={{
+                  padding: "12px 24px",
+                  fontSize: 16,
+                  cursor: isTriggering ? "not-allowed" : "pointer",
+                  borderRadius: 8,
+                  border: "none",
+                  background: isTriggering ? "#312e81" : "linear-gradient(135deg, #6366f1, #8b5cf6)",
+                  color: "white",
+                  fontWeight: "bold",
+                  boxShadow: isTriggering ? "none" : "0 4px 12px rgba(99, 102, 241, 0.4)",
+                  transition: "all 0.2s",
+                  animation: isTriggering ? "none" : "pulse 2s infinite",
+                }}
+              >
+                {isTriggering ? "⏳ Queuing..." : "🎬 Create Master Video"}
+              </button>
+            )}
           </div>
         </div>
 

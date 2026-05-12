@@ -291,14 +291,6 @@ async def broadcast_status(command: str, session_id: str | None = None, **kwargs
     # Notify dashboard via manager (for session specific listeners)
     if payload["session_id"]:
         await manager.broadcast(payload["session_id"], payload)
-        
-    # Also notify all active dashboards (global monitoring)
-    for dash in list(active_dashboards):
-        try:
-            await dash.send_json(payload)
-        except Exception:
-            pass
-
 
 # ── HTTP endpoints ────────────────────────────────────────────────────────────
 
@@ -505,24 +497,47 @@ async def finalize_session(
                 except Exception:
                     pass
 
-        # ── Schedule the Phase-2 master render ──────────────────────────────
-        # This runs in the background AFTER all chunk tasks complete.
-        # It concatenates raw chunks → aligns once → stitches the final master.
-        produce_master_video.apply_async(
-            kwargs={
-                "session_id": session_id,
-                "cam_ids": cam_list,
-                "layout": layout,
-            },
-            countdown=5,  # Small delay so chunk tasks can start first
-        )
-        log_diag(f"🎬 Master render task queued for session {session_id}")
-
         return {"status": "success", "session_id": session_id, "processed_count": len(indices_to_process)}
     except Exception as e:
         logger.error(f"❌ Failed to finalize session: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@router.post("/trigger-master")
+async def trigger_master_render(
+    session_id: str = Form(...),
+    selected_cameras: str = Form(...),
+    layout: str = Form("hstack"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Manually trigger the Phase-2 master render.
+    Should be called after all chunk processing tasks are completed.
+    """
+    try:
+        try:
+            sess_uuid = uuid.UUID(session_id)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Invalid session ID format")
+
+        cam_list = [c.strip() for c in selected_cameras.split(",") if c.strip()]
+        if not cam_list:
+            raise HTTPException(status_code=400, detail="No cameras selected")
+
+        log_diag(f"🎬 Triggering master render for session {session_id}")
+        
+        produce_master_video.apply_async(
+            kwargs={
+                "session_id": session_id,
+                "cam_ids": cam_list,
+                "layout": layout,
+            }
+        )
+        
+        return {"status": "success", "session_id": session_id, "message": "Master render triggered"}
+    except Exception as e:
+        logger.error(f"❌ Failed to trigger master render: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/master-status/{session_id}")
 async def master_status(
