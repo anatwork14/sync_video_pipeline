@@ -82,9 +82,9 @@ def stitch_chunks(
     if n == 1:
         combined_video = video_streams[0]
     elif layout == StitchLayout.HSTACK:
-        combined_video = ffmpeg.filter(video_streams, "hstack", inputs=n)
+        combined_video = ffmpeg.filter(video_streams, "hstack", inputs=n, shortest=1)
     elif layout == StitchLayout.VSTACK:
-        combined_video = ffmpeg.filter(video_streams, "vstack", inputs=n)
+        combined_video = ffmpeg.filter(video_streams, "vstack", inputs=n, shortest=1)
     elif layout == StitchLayout.GRID_2x2:
         active_streams = video_streams[:4]
         # Pad to exactly 4 tiles with a black synthetic source
@@ -95,9 +95,9 @@ def stitch_chunks(
                 .video
             )
             active_streams.append(placeholder)
-        top = ffmpeg.filter([active_streams[0], active_streams[1]], "hstack", inputs=2)
-        bottom = ffmpeg.filter([active_streams[2], active_streams[3]], "hstack", inputs=2)
-        combined_video = ffmpeg.filter([top, bottom], "vstack", inputs=2)
+        top = ffmpeg.filter([active_streams[0], active_streams[1]], "hstack", inputs=2, shortest=1)
+        bottom = ffmpeg.filter([active_streams[2], active_streams[3]], "hstack", inputs=2, shortest=1)
+        combined_video = ffmpeg.filter([top, bottom], "vstack", inputs=2, shortest=1)
     else:
         raise ValueError(f"Unknown layout: {layout}")
 
@@ -107,10 +107,11 @@ def stitch_chunks(
         "preset": "fast",
         "crf": 23,
         "pix_fmt": "yuv420p",  # Maximum player compatibility
+        "shortest": None,      # End encoding when the shortest stream ends
     }
 
     if audio_streams:
-        combined_audio = ffmpeg.filter(audio_streams, "amix", inputs=len(audio_streams))
+        combined_audio = ffmpeg.filter(audio_streams, "amix", inputs=len(audio_streams), duration="shortest")
         out_kwargs["acodec"] = "aac"
         stream = ffmpeg.output(combined_video, combined_audio, str(output_path), **out_kwargs)
     else:

@@ -1,26 +1,26 @@
-import asyncio
-import sys
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy import text
 
-async def check():
-    # Use localhost:5435 (mapped port)
-    url = "postgresql+asyncpg://postgres:password@localhost:5435/videosync"
-    print(f"Connecting to {url}...")
+import sqlite3
+import os
+
+db_path = "backend/sync_video.db"
+if os.path.exists(db_path):
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
     try:
-        engine = create_async_engine(url)
-        async with engine.begin() as conn:
-            # Check for sessions table
-            res = await conn.execute(text("SELECT count(*) FROM sessions"))
-            count = res.scalar()
-            print(f"Success! Found {count} sessions.")
+        cursor.execute("SELECT id, status, camera_count, created_at FROM sessions ORDER BY created_at DESC LIMIT 5")
+        sessions = cursor.fetchall()
+        print("Latest Sessions:")
+        for s in sessions:
+            print(f"ID: {s[0]}, Status: {s[1]}, Cams: {s[2]}, Created: {s[3]}")
             
-            # Check columns
-            res = await conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name = 'sessions'"))
-            cols = [r[0] for r in res.all()]
-            print(f"Columns in sessions: {cols}")
+        cursor.execute("SELECT session_id, status, url, finished_at FROM master_videos ORDER BY finished_at DESC LIMIT 5")
+        masters = cursor.fetchall()
+        print("\nLatest Master Videos:")
+        for m in masters:
+            print(f"Session: {m[0]}, Status: {m[1]}, URL: {m[2]}, Finished: {m[3]}")
     except Exception as e:
         print(f"Error: {e}")
-
-if __name__ == "__main__":
-    asyncio.run(check())
+    finally:
+        conn.close()
+else:
+    print(f"DB not found at {db_path}")

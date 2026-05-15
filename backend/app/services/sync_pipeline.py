@@ -3,12 +3,13 @@ Orchestrates the full sync pipeline for a single chunk set.
 Called by the Celery task after all cameras have uploaded.
 """
 import logging
+import shutil
 import subprocess
 from pathlib import Path
 
 from app.config import get_settings
 from app.services.offset import save_offsets, load_offsets
-from app.services.alignment import align_all_chunks
+from app.services.alignment import align_all_chunks, align_chunk
 from app.services.stitching import stitch_chunks, StitchLayout
 from app.services.strategies import get_sync_strategy
 
@@ -16,73 +17,126 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-def _repair_full_stream(raw_combined_path: Path, repaired_path: Path) -> bool:
+def _has_audio_stream(path: Path) -> bool:
     """
-    Repair a concatenated raw stream into a clean MP4.
+    Probe a media file and return True if it contains at least one audio stream.
+    Browser MediaRecorder chunks sometimes lack audio (denied mic permission,
+    screen-share without audio, the very first chunk before the audio track
+    starts), so we have to check before assuming `[i:a]` is mappable.
     """
-    cmd = [
-        "ffmpeg", "-y",
-        "-fflags", "+genpts+igndts+discardcorrupt",
-        "-analyzeduration", "100M", "-probesize", "100M",
-        "-i", str(raw_combined_path),
-        "-c:v", "libx264", 
-        "-preset", "medium",
-        "-crf", "18",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-movflags", "+faststart",
-        str(repaired_path),
-    ]
-    logger.info(f"Repairing full stream: {raw_combined_path.name} -> {repaired_path.name}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
-    if result.returncode != 0:
-        logger.error(f"Full stream repair failed: {result.stderr[-500:]}")
-        return False
-        
-    return repaired_path.exists() and repaired_path.stat().st_size > 0
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=codec_type",
+            "-of", "csv=p=0",
+            str(path),
+        ],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0 and "audio" in result.stdout
 
 
-def _concat_camera_chunks(session_dir: Path, cam_ids: list[str]) -> dict[str, Path]:
+def _concat_camera_chunks(session_dir: Path, cam_id_list: list[str]) -> dict[str, Path]:
     """
-    Concatenate all chunks for each camera into full videos.
+    Concatenate all chunks for each camera into a single full video.
+
+    We use the FFmpeg 'concat' filter (not the concat demuxer) because it
+    decodes all chunks into a raw stream and then re-encodes them, which
+    flattens any timestamp resets from broken MKV headers in browser
+    recordings.
+
+    If any chunk for a camera is missing an audio stream, we fall back to
+    a video-only concat for that camera — the alternative is FFmpeg
+    aborting with "Stream specifier ':a' matches no streams".
+
     Returns dict cam_id -> full_video_path
     """
-    full_videos = {}
-    for cam_id in cam_ids:
-        chunk_paths = []
-        chunk_dirs = sorted(
-            [d for d in session_dir.glob("chunk_*") if d.is_dir()],
-            key=lambda d: int(d.name.split("_")[1]),
-        )
+    full_videos: dict[str, Path] = {}
+
+    chunk_dirs = sorted(
+        [d for d in session_dir.glob("chunk_*") if d.is_dir()],
+        key=lambda d: int(d.name.split("_")[1]),
+    )
+
+    for cam_id in cam_id_list:
+        chunk_paths: list[Path] = []
         for chunk_dir in chunk_dirs:
-            chunk_file = chunk_dir / f"{cam_id}.mp4"
+            # Check for .mkv (live) or .mp4 (manual upload)
+            chunk_file = chunk_dir / f"{cam_id}.mkv"
+            if not chunk_file.exists():
+                chunk_file = chunk_dir / f"{cam_id}.mp4"
             if chunk_file.exists():
                 chunk_paths.append(chunk_file)
-        
+
         if not chunk_paths:
             logger.warning(f"No chunks found for cam {cam_id}")
             continue
-        
-        raw_combined_path = session_dir / f"raw_combined_{cam_id}.mp4"
-        logger.info(f"Binary concatenating {len(chunk_paths)} chunks for {cam_id} -> {raw_combined_path}")
-        
-        # Binary concat
-        with open(raw_combined_path, "wb") as outfile:
-            for chunk in chunk_paths:
-                with open(chunk, "rb") as infile:
-                    outfile.write(infile.read())
-        
-        # Repair the full stream
+
+        n = len(chunk_paths)
         repaired_path = session_dir / f"full_{cam_id}.mp4"
-        if _repair_full_stream(raw_combined_path, repaired_path):
-            logger.info(f"✅ Repair succeeded for {cam_id} -> {repaired_path}")
+        logger.info(f"[{cam_id}] Starting concat-filter for {n} chunks")
+
+        # Only include audio if EVERY input has it — concat filter requires
+        # every input to expose every mapped stream type.
+        all_have_audio = all(_has_audio_stream(p) for p in chunk_paths)
+        if not all_have_audio:
+            logger.warning(
+                f"[{cam_id}] One or more chunks lack an audio stream; "
+                f"falling back to video-only concat"
+            )
+
+        cmd: list[str] = [
+            "ffmpeg", "-y",
+            "-fflags", "+genpts+igndts+discardcorrupt",
+            "-analyzeduration", "100M",
+            "-probesize", "100M",
+        ]
+        for p in chunk_paths:
+            cmd.extend(["-i", str(p)])
+
+        if all_have_audio:
+            inputs = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(n))
+            filter_complex = f"{inputs}concat=n={n}:v=1:a=1[v][a]"
+            maps = ["-map", "[v]", "-map", "[a]"]
+            audio_args = ["-c:a", "aac", "-b:a", "128k"]
+        else:
+            inputs = "".join(f"[{i}:v:0]" for i in range(n))
+            filter_complex = f"{inputs}concat=n={n}:v=1:a=0[v]"
+            maps = ["-map", "[v]"]
+            audio_args = ["-an"]
+
+        cmd.extend([
+            "-filter_complex", filter_complex,
+            *maps,
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            *audio_args,
+            "-movflags", "+faststart",
+            str(repaired_path),
+        ])
+
+        logger.info(
+            f"[{cam_id}] Running concat filter ({n} inputs, audio={all_have_audio})"
+        )
+        res = subprocess.run(cmd, capture_output=True, text=True)
+
+        if (
+            res.returncode == 0
+            and repaired_path.exists()
+            and repaired_path.stat().st_size > 0
+        ):
+            logger.info(f"✅ Concat filter succeeded for {cam_id} -> {repaired_path}")
             full_videos[cam_id] = repaired_path
         else:
-            logger.error(f"Repair failed for {cam_id}, using raw combined")
-            full_videos[cam_id] = raw_combined_path
-    
+            # Last 1000 chars often cuts off the real cause — give ourselves room.
+            logger.error(
+                f"Concat filter failed for {cam_id} (returncode={res.returncode})\n"
+                f"STDERR (last 3000 chars):\n{res.stderr[-3000:]}"
+            )
+
     return full_videos
 
 
@@ -96,13 +150,14 @@ def run_full_sync_pipeline(
     Full pipeline for full videos: concat chunks -> compute offsets -> align -> stitch.
     """
     from app.ws.redis_bridge import publish_event_sync
+
     storage = Path(settings.storage_base).resolve()
     logger.info(f"[{session_id}] Resolved storage base: {storage}")
-    
+
     session_dir = storage / "raw" / session_id
     aligned_dir = (session_dir / "aligned").resolve()
     synced_dir = (storage / "synced" / session_id).resolve()
-    
+
     synced_dir.mkdir(parents=True, exist_ok=True)
     aligned_dir.mkdir(parents=True, exist_ok=True)
 
@@ -117,23 +172,36 @@ def run_full_sync_pipeline(
     })
     full_videos = _concat_camera_chunks(session_dir, cam_ids)
     if not full_videos:
-        raise ValueError("No full videos created")
+        raise RuntimeError(
+            f"[{session_id}] No full videos created during concat step. "
+            f"Cameras requested: {cam_ids}. See logs above for FFmpeg stderr."
+        )
+
+    # Use only cameras that successfully produced a full video
+    valid_cam_ids = list(full_videos.keys())
+
+    # Rename full_<cam>.mp4 -> <cam>.mp4 so the offset strategy and alignment
+    # step can find them with their canonical name. replace() is atomic on
+    # POSIX and (unlike rename()) overwrites an existing target, which matters
+    # on retries where a stale file may already be there.
+    for cam_id, path in full_videos.items():
+        new_path = session_dir / f"{cam_id}.mp4"
+        if path != new_path:
+            logger.debug(f"[{session_id}] Renaming {path.name} -> {new_path.name}")
+            path.replace(new_path)
 
     # Step 2: Compute offsets using full videos
-    logger.info(f"[{session_id}] Computing offsets from full videos using {strategy_name} strategy...")
+    logger.info(
+        f"[{session_id}] Computing offsets from full videos "
+        f"using {strategy_name} strategy..."
+    )
     publish_event_sync({
         "type": "computing_offsets",
         "session_id": session_id,
         "message": f"Computing offsets using {strategy_name} strategy...",
     })
     strategy = get_sync_strategy(strategy_name)
-    
-    for cam_id, path in full_videos.items():
-        new_path = session_dir / f"{cam_id}.mp4"
-        if path != new_path:
-            path.rename(new_path)
-
-    offsets = strategy.compute_offsets(session_dir, cam_ids)
+    offsets = strategy.compute_offsets(session_dir, valid_cam_ids)
     save_offsets(offsets, session_dir)
     logger.info(f"[{session_id}] Offsets saved: {offsets}")
 
@@ -144,18 +212,37 @@ def run_full_sync_pipeline(
         "session_id": session_id,
         "message": "Trimming and aligning video streams...",
     })
-    
-    from app.services.alignment import align_chunk
-    aligned_paths = {}
+
+    # Clear stale aligned files to avoid FFmpeg in-place conflict on retry
+    if aligned_dir.exists():
+        shutil.rmtree(aligned_dir)
+    aligned_dir.mkdir(parents=True, exist_ok=True)
+
+    aligned_paths: dict[str, Path] = {}
     for cam_id, offset in offsets.items():
         input_path = session_dir / f"{cam_id}.mp4"
-        output_path = aligned_dir / f"{cam_id}_aligned.mp4"
+        aligned_file_path = aligned_dir / f"{cam_id}_aligned.mp4"
         if input_path.exists():
-            align_chunk(input_path, output_path, offset, chunk_index=None)
-            aligned_paths[cam_id] = output_path
+            # chunk_index=0 keeps repair logic happy for the full-video case;
+            # see align_chunk for details.
+            align_chunk(input_path, aligned_file_path, offset, chunk_index=0)
+            if aligned_file_path.exists() and aligned_file_path.stat().st_size > 0:
+                aligned_paths[cam_id] = aligned_file_path
+            else:
+                logger.error(
+                    f"[{session_id}] align_chunk produced no output for {cam_id}"
+                )
         else:
-            logger.warning(f"[{session_id}] Could not find input path for alignment: {input_path}")
+            logger.warning(
+                f"[{session_id}] Could not find input path for alignment: {input_path}"
+            )
 
+    if not aligned_paths:
+        raise RuntimeError(
+            f"[{session_id}] Alignment step produced no outputs. "
+            f"Cameras requested: {list(offsets.keys())}. "
+            f"See logger output above for FFmpeg stderr."
+        )
 
     # Step 4: Stitch
     logger.info(f"[{session_id}] Stitching with layout={layout}...")
@@ -184,14 +271,15 @@ def run_sync_pipeline(
         Path to the final synced output video.
     """
     from app.ws.redis_bridge import publish_event_sync
+
     storage = Path(settings.storage_base).resolve()
     logger.info(f"[{session_id}] Resolved storage base: {storage}")
-    
+
     session_dir = storage / "raw" / session_id
     chunk_dir = (session_dir / f"chunk_{chunk_index}").resolve()
     aligned_dir = (session_dir / f"chunk_{chunk_index}_aligned").resolve()
     synced_dir = (storage / "synced" / session_id).resolve()
-    
+
     logger.info(f"[{session_id}] Chunk dir: {chunk_dir}")
     synced_dir.mkdir(parents=True, exist_ok=True)
 
@@ -199,7 +287,10 @@ def run_sync_pipeline(
 
     # Step 1: Compute offsets — only on the first chunk
     if chunk_index == 0:
-        logger.info(f"[{session_id}] Computing offsets from chunk_0 using {strategy_name} strategy...")
+        logger.info(
+            f"[{session_id}] Computing offsets from chunk_0 "
+            f"using {strategy_name} strategy..."
+        )
         publish_event_sync({
             "type": "computing_offsets",
             "session_id": session_id,
@@ -222,10 +313,18 @@ def run_sync_pipeline(
         "chunk_index": chunk_index,
         "message": "Trimming and aligning video streams...",
     })
+
+    # Clear stale aligned files for this chunk to avoid in-place conflicts on retry
+    if aligned_dir.exists():
+        shutil.rmtree(aligned_dir)
+    aligned_dir.mkdir(parents=True, exist_ok=True)
+
     aligned_paths = align_all_chunks(chunk_dir, aligned_dir, offsets)
 
     # Step 3: Stitch
-    logger.info(f"[{session_id}] Stitching chunk_{chunk_index} with layout={layout}...")
+    logger.info(
+        f"[{session_id}] Stitching chunk_{chunk_index} with layout={layout}..."
+    )
     publish_event_sync({
         "type": "stitching",
         "session_id": session_id,

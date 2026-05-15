@@ -206,10 +206,36 @@ def process_full_session(
 ) -> dict:
     """
     Process the full session: concat chunks -> sync full videos.
+    This replaces both chunk-by-chunk processing and the manual master render step.
     """
+    from app.database import SyncSessionLocal
+    from app.models import MasterVideo
+    import uuid
+
     try:
         log_diag(f"👷 [Full Task] STARTING: session={session_id} strategy={sync_strategy}")
         logger.info(f"[Full Task] Processing session={session_id} cams={cam_ids} strategy={sync_strategy}")
+
+        # -- Mark as processing in DB --
+        try:
+            with SyncSessionLocal() as db:
+                sess_uuid = uuid.UUID(session_id)
+                mv = db.query(MasterVideo).filter_by(session_id=sess_uuid).first()
+                if not mv:
+                    mv = MasterVideo(session_id=sess_uuid)
+                    db.add(mv)
+                mv.status = "processing"
+                mv.started_at = datetime.now(timezone.utc)
+                mv.error = None
+                db.commit()
+        except Exception as db_err:
+            logger.warning(f"[Full Task] Could not update DB status to processing: {db_err}")
+
+        publish_event_sync({
+            "type": "master_started",
+            "session_id": session_id,
+            "message": "Building final master video (Full Pipeline)…",
+        })
 
         output_path = run_full_sync_pipeline(
             session_id=session_id,
@@ -220,10 +246,24 @@ def process_full_session(
 
         relative_url = f"/static/synced/{session_id}/{output_path.name}"
 
+        # -- Mark as completed in DB --
+        try:
+            with SyncSessionLocal() as db:
+                mv = db.query(MasterVideo).filter_by(session_id=uuid.UUID(session_id)).first()
+                if mv:
+                    mv.status = "completed"
+                    mv.file_path = str(output_path)
+                    mv.url = relative_url
+                    mv.finished_at = datetime.now(timezone.utc)
+                    db.commit()
+        except Exception as db_err:
+            logger.warning(f"[Full Task] Could not update DB status to completed: {db_err}")
+
         publish_event_sync({
-            "type": "session_done",
+            "type": "master_done",
             "session_id": session_id,
             "url": relative_url,
+            "message": "🎬 Master video is ready!",
         })
 
         log_diag(f"✅ [Full Task] COMPLETED: session={session_id} -> {output_path}")
@@ -238,11 +278,25 @@ def process_full_session(
         }
 
     except Exception as exc:
-        log_diag(f"❌ [Full Task] FAILED: session={session_id}: {exc}")
-        logger.error(f"[Full Task] Failed session={session_id}: {exc}", exc_info=True)
+        error_msg = str(exc)
+        log_diag(f"❌ [Full Task] FAILED: session={session_id}: {error_msg}")
+        logger.error(f"[Full Task] Failed session={session_id}: {error_msg}", exc_info=True)
+
+        # -- Mark as failed in DB --
+        try:
+            with SyncSessionLocal() as db:
+                mv = db.query(MasterVideo).filter_by(session_id=uuid.UUID(session_id)).first()
+                if mv:
+                    mv.status = "failed"
+                    mv.error = error_msg
+                    mv.finished_at = datetime.now(timezone.utc)
+                    db.commit()
+        except Exception as db_err:
+            logger.warning(f"[Full Task] Could not update DB status to failed: {db_err}")
+
         publish_event_sync({
-            "type": "error",
+            "type": "master_error",
             "session_id": session_id,
-            "message": str(exc),
+            "message": f"Full sync failed: {error_msg}",
         })
         raise self.retry(exc=exc)

@@ -15,10 +15,6 @@ export default function LivePage() {
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [syncStrategy, setSyncStrategy] = useState("auto");
   const [finalizeError, setFinalizeError] = useState<string | null>(null);
-  const [masterReady, setMasterReady] = useState(false); // chunks done, master can be triggered
-  const [isTriggering, setIsTriggering] = useState(false);
-  const chunksDoneRef = useRef<Set<number>>(new Set());
-  const chunksExpectedRef = useRef<number | null>(null); // set when finalize response arrives
 
   // Phase-1 preview chunks
   const [previewChunks, setPreviewChunks] = useState<{ index: number; url: string }[]>([]);
@@ -30,6 +26,10 @@ export default function LivePage() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const masterPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Stable ref so camera IDs are never lost when the watchdog clears them from state
+  const cameraIdsRef = useRef<Set<string>>(new Set());
+  // Stable ref so sessionId is always readable inside async callbacks
+  const sessionIdRef = useRef<string | null>(null);
 
   // Poll master status until completed or failed
   const startMasterPolling = useCallback((sid: string) => {
@@ -73,6 +73,8 @@ export default function LivePage() {
             setCameras((prev) => {
               const now = Date.now();
               const existing = prev.find((c) => c.id === data.id);
+              // Always track camera in ref so it survives the watchdog
+              cameraIdsRef.current.add(data.id);
               if (existing) {
                 return prev.map((c) =>
                   c.id === data.id ? { ...c, image: data.image, lastSeen: now } : c
@@ -83,6 +85,7 @@ export default function LivePage() {
             });
           } else if (data.type === "disconnect") {
             setCameras((prev) => prev.filter((c) => c.id !== data.id));
+            // Do NOT remove from cameraIdsRef — we still want to process their chunks
           } else if (data.type === "info") {
             if (data.message === "ESP32_STARTED" || data.message === "STARTED") {
               setIsRecording(true);
@@ -110,14 +113,6 @@ export default function LivePage() {
               if (exists) return prev;
               return [...prev, { index: data.chunk_index, url: data.url }].sort((a, b) => a.index - b.index);
             });
-            // Track done chunks — when all expected are done, enable master trigger
-            chunksDoneRef.current.add(data.chunk_index);
-            if (
-              chunksExpectedRef.current !== null &&
-              chunksDoneRef.current.size >= chunksExpectedRef.current
-            ) {
-              setMasterReady(true);
-            }
           } else if (data.type === "master_started") {
             setMasterStatus("processing");
           } else if (data.type === "master_done") {
@@ -150,32 +145,39 @@ export default function LivePage() {
 
   const handleStart = () => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      const sid = Date.now().toString();
+      // Use a real UUID so it matches the backend uuid.UUID() parsing
+      const sid = crypto.randomUUID();
       setSessionId(sid);
+      sessionIdRef.current = sid;
       setIsRecording(true);
       setPreviewChunks([]);
       setMasterStatus("idle");
-      setMasterReady(false);
-      setIsTriggering(false);
       setMasterUrl(null);
       setMasterError(null);
-      chunksDoneRef.current = new Set();
-      chunksExpectedRef.current = null;
+      // Reset camera tracking for the new session
+      cameraIdsRef.current = new Set(cameras.map(c => c.id));
       wsRef.current.send(JSON.stringify({ command: "start", session_id: sid }));
     }
   };
 
   const handleStop = async () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN && sessionId) {
+    const currentSessionId = sessionIdRef.current;
+    if (wsRef.current?.readyState === WebSocket.OPEN && currentSessionId) {
       setIsRecording(false);
       setIsFinalizing(true);
       setFinalizeError(null);
       wsRef.current.send(JSON.stringify({ command: "stop" }));
 
-      const camIds = cameras.map(c => c.id).join(",");
+      // Use ref so we always have the full set of cameras that participated,
+      // even if some disconnected and were removed by the watchdog.
+      const camIds = Array.from(cameraIdsRef.current).join(",");
       if (camIds) {
+        // Small delay to let WS "stop" propagate to the backend and update
+        // the session status from "recording" to "stopped" before we call /finalize.
+        await new Promise(resolve => setTimeout(resolve, 600));
+
         const formData = new URLSearchParams();
-        formData.append("session_id", sessionId);
+        formData.append("session_id", currentSessionId);
         formData.append("selected_cameras", camIds);
         formData.append("layout", "hstack");
         formData.append("sync_strategy", syncStrategy);
@@ -189,52 +191,23 @@ export default function LivePage() {
             const errText = await res.text();
             throw new Error(`Finalize failed: ${errText}`);
           }
-          const data = await res.json();
-          // Set how many chunks we expect to be done before enabling master
-          chunksExpectedRef.current = data.processed_count ?? null;
+          const json = await res.json();
           setIsFinalizing(false);
-          // Do NOT start master polling yet — wait for user to click trigger
+          // Always poll — works for both fresh start and already-running cases
+          startMasterPolling(currentSessionId);
         } catch (err: any) {
           console.error("Failed to finalize session:", err);
           setFinalizeError(err.message || "Failed to finalize session. Please retry.");
           setIsFinalizing(false);
         }
       } else {
+        // No cameras recorded — nothing to sync
         setIsFinalizing(false);
+        setFinalizeError("No cameras were recorded. Cannot sync.");
       }
     } else if (wsRef.current?.readyState === WebSocket.OPEN) {
       setIsRecording(false);
       wsRef.current.send(JSON.stringify({ command: "stop" }));
-    }
-  };
-
-  const handleTriggerMaster = async () => {
-    if (!sessionId) return;
-    setIsTriggering(true);
-    setMasterStatus("pending");
-    setMasterError(null);
-    const camIds = cameras.map(c => c.id).join(",");
-    const formData = new URLSearchParams();
-    formData.append("session_id", sessionId);
-    formData.append("selected_cameras", camIds);
-    formData.append("layout", "hstack");
-    try {
-      const res = await fetch("/api/live/trigger-master", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: formData.toString()
-      });
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Trigger failed: ${errText}`);
-      }
-      setMasterReady(false);
-      startMasterPolling(sessionId);
-    } catch (err: any) {
-      setMasterStatus("failed");
-      setMasterError(err.message || "Failed to trigger master render.");
-    } finally {
-      setIsTriggering(false);
     }
   };
 
@@ -323,27 +296,6 @@ export default function LivePage() {
             >
               {isFinalizing ? "⏹ PROCESSING..." : "⏹ STOP & SYNC"}
             </button>
-            {masterReady && masterStatus === "idle" && (
-              <button
-                onClick={handleTriggerMaster}
-                disabled={isTriggering}
-                style={{
-                  padding: "12px 24px",
-                  fontSize: 16,
-                  cursor: isTriggering ? "not-allowed" : "pointer",
-                  borderRadius: 8,
-                  border: "none",
-                  background: isTriggering ? "#312e81" : "linear-gradient(135deg, #6366f1, #8b5cf6)",
-                  color: "white",
-                  fontWeight: "bold",
-                  boxShadow: isTriggering ? "none" : "0 4px 12px rgba(99, 102, 241, 0.4)",
-                  transition: "all 0.2s",
-                  animation: isTriggering ? "none" : "pulse 2s infinite",
-                }}
-              >
-                {isTriggering ? "⏳ Queuing..." : "🎬 Create Master Video"}
-              </button>
-            )}
           </div>
         </div>
 

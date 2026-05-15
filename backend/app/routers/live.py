@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.database import AsyncSessionLocal, get_db
 from app.models import Session, Chunk
 from app.ws.manager import manager
-from app.workers.tasks import process_chunk_set, produce_master_video
+from app.workers.tasks import process_full_session
 from app.diag_logger import log_diag
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -171,13 +171,16 @@ async def handle_trigger_logic(session_id_from_dash: str | None = None, layout: 
         
         captured = list(captured_set)
         
-        # Update DB status
+        # Update DB: mark as "stopped" — NOT "completed".
+        # "completed" is reserved for after the master render finishes.
+        # If we set it to "completed" here, the finalize endpoint will refuse to
+        # process it (thinking it's already done).
         async with AsyncSessionLocal() as db:
             try:
                 sess_uuid = uuid.UUID(stopped_session)
                 db_session = await db.get(Session, sess_uuid)
                 if db_session:
-                    db_session.status = "completed"
+                    db_session.status = "stopped"
                     await db.commit()
             except Exception as e:
                 log_diag(f"❌ Failed to update DB session status: {e}")
@@ -449,6 +452,13 @@ async def finalize_session(
         if not cam_list:
             raise HTTPException(status_code=400, detail="No cameras selected")
 
+        if db_session.status in ["processing", "completed"]:
+            logger.info(f"Session {session_id} is already {db_session.status}, skipping duplicate finalize.")
+            return {"status": "already_running", "session_id": session_id, "message": f"Session already {db_session.status}."}
+
+        if db_session.status not in ["stopped", "recording"]:
+            logger.warning(f"Session {session_id} has unexpected status '{db_session.status}' for finalize — proceeding anyway.")
+
         # Update session with selected camera count, layout and sync strategy
         db_session.camera_count = len(cam_list)
         db_session.layout = layout
@@ -456,88 +466,35 @@ async def finalize_session(
         db_session.status = "processing"
         await db.commit()
 
-        # Trigger processing for every chunk index we have recorded
-        indices_to_process = []
-        if session_id in uploaded_chunks:
-            indices_to_process = sorted(uploaded_chunks[session_id].keys())
+        from app.workers.tasks import process_full_session
+        process_full_session.delay(
+            session_id=session_id,
+            cam_ids=cam_list,
+            layout=layout,
+            sync_strategy=sync_strategy,
+        )
+
+        processing_event = {
+            "type": "master_started",
+            "session_id": session_id,
+            "message": "Building final master video…"
+        }
+        await manager.broadcast(session_id, processing_event)
         
-        # If in-memory is empty, try to recover from DB
-        if not indices_to_process:
-            from sqlalchemy import select
-            result = await db.execute(
-                select(Chunk.chunk_index).where(Chunk.session_id == sess_uuid).distinct()
-            )
-            indices_to_process = sorted([r[0] for r in result.all()])
-            logger.info(f"🔄 Recovered {len(indices_to_process)} chunk indices from DB for session {session_id}")
+        # Also notify all active dashboards
+        for dash in list(active_dashboards):
+            try:
+                await dash.send_json(processing_event)
+            except Exception:
+                pass
 
-        if not indices_to_process:
-            logger.warning(f"⚠️ No chunks found for session {session_id}. Nothing to process.")
-            return {"status": "success", "session_id": session_id, "message": "No chunks found"}
-
-        for idx in indices_to_process:
-            process_chunk_set.delay(
-                session_id=session_id,
-                chunk_index=idx,
-                cam_ids=cam_list,
-                sync_strategy=sync_strategy,
-                layout=layout,
-            )
-            
-            processing_event = {
-                "type": "processing_started",
-                "session_id": session_id,
-                "chunk_index": idx
-            }
-            await manager.broadcast(session_id, processing_event)
-            
-            # Also notify all active dashboards
-            for dash in list(active_dashboards):
-                try:
-                    await dash.send_json(processing_event)
-                except Exception:
-                    pass
-
-        return {"status": "success", "session_id": session_id, "processed_count": len(indices_to_process)}
+        return {"status": "success", "session_id": session_id, "message": "Full sync processing started."}
     except Exception as e:
         logger.error(f"❌ Failed to finalize session: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/trigger-master")
-async def trigger_master_render(
-    session_id: str = Form(...),
-    selected_cameras: str = Form(...),
-    layout: str = Form("hstack"),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Manually trigger the Phase-2 master render.
-    Should be called after all chunk processing tasks are completed.
-    """
-    try:
-        try:
-            sess_uuid = uuid.UUID(session_id)
-        except (ValueError, TypeError):
-            raise HTTPException(status_code=400, detail="Invalid session ID format")
 
-        cam_list = [c.strip() for c in selected_cameras.split(",") if c.strip()]
-        if not cam_list:
-            raise HTTPException(status_code=400, detail="No cameras selected")
-
-        log_diag(f"🎬 Triggering master render for session {session_id}")
-        
-        produce_master_video.apply_async(
-            kwargs={
-                "session_id": session_id,
-                "cam_ids": cam_list,
-                "layout": layout,
-            }
-        )
-        
-        return {"status": "success", "session_id": session_id, "message": "Master render triggered"}
-    except Exception as e:
-        logger.error(f"❌ Failed to trigger master render: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/master-status/{session_id}")
 async def master_status(
